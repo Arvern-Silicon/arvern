@@ -1,0 +1,551 @@
+#!/bin/bash
+#----------------------------------------------------------------------------
+#          _    _           Family:    aRVern System IPs
+#         / \__/ \          Module:    run_syn
+#        /   /\   \         --------------------------------------------
+#    ===/   /=========      Copyright: (c) 2026, aRVern-dev
+#      /   / RV \   \       Contact:   arvernsilicon@gmail.com
+#     /___/______\___\      GitHub:    https://github.com/Arvern-Silicon
+#
+# SPDX-License-Identifier: BSD-3-Clause
+# Full license text is available in the LICENSE file at the repository root.
+#----------------------------------------------------------------------------
+# File Name          : run_syn
+# Module Description : Driver script: build the arvern netlist under one or many parameter configurations (host-side).
+#----------------------------------------------------------------------------
+
+# Parse command line arguments
+NO_QUIT=0
+LIB_FLAVOR="lib_default"
+RTL_CONFIG=""            # empty = use run_config.json defaults (single run)
+RTL_SWEEP=0              # 1 = iterate every config in the shared sweep set
+FORCE_SYNC_RESET=0       # 1 = force ASYNC_RST_EN=0 (sync reset) regardless of config
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -noquit|--noquit|--interactive|-i)
+            NO_QUIT=1
+            shift
+            ;;
+        -lib|--lib)
+            LIB_FLAVOR="$2"
+            shift 2
+            ;;
+        -rtl_config|--rtl_config)
+            # Accept any of these equivalent forms:
+            #   -rtl_config 4              (single)
+            #   -rtl_config 4,2            (comma list)
+            #   -rtl_config 4 2 15         (space list, until next -flag)
+            #   -rtl_config 4,2 15         (mixed)
+            # Internally normalize to a comma-separated string so the
+            # downstream validation/loop sees one consistent format.
+            shift
+            if [[ $# -eq 0 || "$1" == -* ]]; then
+                echo "Error: -rtl_config requires at least one config index" >&2
+                exit 1
+            fi
+            while [[ $# -gt 0 && "$1" != -* ]]; do
+                if [[ -n "$RTL_CONFIG" ]]; then
+                    RTL_CONFIG="$RTL_CONFIG,$1"
+                else
+                    RTL_CONFIG="$1"
+                fi
+                shift
+            done
+            ;;
+        -rtl_sweep|--rtl_sweep)
+            RTL_SWEEP=1
+            shift
+            ;;
+        -with_sync_reset|--with_sync_reset)
+            # Force synchronous reset (ASYNC_RST_EN=0) on top of whatever config
+            # is selected -- e.g. build the 'light' persona but with sync reset:
+            #   ./run_syn -rtl_config light -with_sync_reset
+            FORCE_SYNC_RESET=1
+            shift
+            ;;
+        -list_configs|--list_configs)
+            # Print the sweep set (same numbering as -rtl_config N / -rtl_sweep
+            # and as ./run -list_configs / ./run_all -list_configs) and exit.
+            exec python3 ./gen_rtl_params.py --list-configs
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [-noquit|--interactive|-i] [-lib <flavor>] [-rtl_config N|NAME[,N|NAME...] | -rtl_sweep] [-with_sync_reset]"
+            echo "  -noquit, --noquit, --interactive, -i : Keep dc_shell open after synthesis"
+            echo "  -lib <flavor>                        : Select library flavor (default: lib_default)"
+            echo "  -rtl_config N|NAME[,N|NAME...]       : Synthesize sweep config(s); accepts a 1-based"
+            echo "                                         integer index (e.g. 14 — same numbering as"
+            echo "                                         ./run_all -rtl_sweep / run_lint --sweep) and/or"
+            echo "                                         a persona name (minimal / medium / full from"
+            echo "                                         bin/rtl_sweep_configs.py:PERSONAS). Mix freely,"
+            echo "                                         e.g. '14,minimal,full'. A single entry keeps"
+            echo "                                         legacy ./results/ output; multi-entry runs"
+            echo "                                         snapshot per-config to ./results_sweep/."
+            echo "  -rtl_sweep                           : Synthesize EVERY config in the sweep set;"
+            echo "                                         per-config outputs land in ./results_sweep/<NN>_<label>/"
+            echo "  -with_sync_reset                     : Force synchronous reset (ASYNC_RST_EN=0) for the"
+            echo "                                         selected persona/config, overriding its generated"
+            echo "                                         value, e.g. '-rtl_config light -with_sync_reset'."
+            exit 1
+            ;;
+    esac
+done
+
+if [[ -n "$RTL_CONFIG" && $RTL_SWEEP -eq 1 ]]; then
+    echo "Error: -rtl_config and -rtl_sweep are mutually exclusive" >&2
+    exit 1
+fi
+
+# Validate library flavor
+if [[ ! -f "./libraries/setup_${LIB_FLAVOR}.tcl" ]]; then
+    echo "Error: Unknown library flavor '${LIB_FLAVOR}'"
+    echo "Valid flavors:"
+    for f in ./libraries/setup_*.tcl; do
+        flavor=$(basename "$f" .tcl | sed 's/^setup_//')
+        echo "  ${flavor}"
+    done
+    exit 1
+fi
+
+# Export variables so synthesis.tcl can read them
+export NO_QUIT
+export LIB_FLAVOR
+
+if [[ $NO_QUIT -eq 1 ]]; then
+    echo "Interactive mode: dc_shell will remain open after synthesis completes"
+fi
+
+# Generate the RTL filelist TCL fragment consumed by read.tcl.
+# Single source of truth: rtl/verilog/filelist.f (shared with sim).
+# Generated once -- the RTL file set is identical across sweep configs.
+FLATTEN_PY="$(dirname "$(realpath "$0")")/../../sim/rtl_sim/bin/flatten_filelist.py"
+"$FLATTEN_PY" --format tcl ../../rtl/verilog/filelist.f ./submit_syn.tcl
+
+# ----------------------------------------------------------------------------
+# Build an extended-regex pattern from ./waivers.txt. Each non-comment,
+# non-blank line is one user pattern; lines or trailing ` #notes` are
+# stripped. Patterns are wrapped in `(...)` and joined with `|` so user-
+# supplied alternation is scoped correctly. Used by both run_one_synthesis
+# (to annotate ./results/synthesis.log immediately after dc_shell) and
+# print_synth_summary (to count waived warnings).
+# ----------------------------------------------------------------------------
+build_waiver_pattern() {
+    local file="${1:-./waivers.txt}"
+    [[ -f "$file" ]] || return 0
+    awk '
+        {
+            sub(/[[:space:]]+#.*$/, "")              # strip inline ` #comment`
+            sub(/^[[:space:]]*#.*$/, "")             # drop full-line comments
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "")  # trim whitespace
+            if (length($0) == 0) next
+            printf "%s(%s)", (n++ ? "|" : ""), $0
+        }
+    ' "$file"
+}
+
+# ----------------------------------------------------------------------------
+# Annotate synthesis.log in place: prepend "[WAIVED] " to every `^Warning:`
+# line matching any waiver pattern. Idempotent (a line already starting with
+# `[WAIVED] ` no longer matches `^Warning:`, so the sed substitution can't
+# re-fire on it). -i.bak is portable across macOS and Linux sed; we drop the
+# backup immediately. Called from run_one_synthesis once per dc_shell run.
+# ----------------------------------------------------------------------------
+annotate_waived_log() {
+    local log_file="$1"
+    [[ -s "$log_file" ]] || return 0
+    local pat
+    pat=$(build_waiver_pattern)
+    [[ -n "$pat" ]] || return 0
+    # awk for the substitution -- GNU sed -E chokes on the nested
+    # `(...)` (group) + `\(...\)` (literal) mix in our waiver patterns
+    # ("Unmatched ( or \("). awk's regex engine is uniform across
+    # gawk/mawk/BSD-awk and handles `\(...\)` as literal parens cleanly.
+    # Idempotent: lines already starting with `[WAIVED] ` no longer match
+    # `^Warning:` so they pass through unchanged.
+    awk -v pat="$pat" '
+        /^Warning:/ && $0 ~ pat { print "[WAIVED] " $0; next }
+        { print }
+    ' "$log_file" > "${log_file}.tmp" && mv "${log_file}.tmp" "$log_file"
+}
+
+# ----------------------------------------------------------------------------
+# Print a one-line summary mirroring the sim-sweep format, e.g.:
+#   Config   1: [PASS] WNS=-1.38ns TNS=-1.38ns gates=37.4k warnings=16 errors=0  - BASE_ISA=0, ...
+# Extracts WNS/TNS from report.timing_analysis.txt, gates from
+# report.area_analysis.txt (NAND2-equivalent → kG), and warning/error counts
+# from synthesis.log. PASS = errors==0 AND WNS >= 0; FAIL otherwise.
+# ----------------------------------------------------------------------------
+print_synth_summary() {
+    local idx_padded="$1"        # zero-padded for column alignment, e.g. "  1", " 14"
+    local results_dir="$2"
+
+    local timing_rpt="$results_dir/report.timing_analysis.txt"
+    local area_rpt="$results_dir/report.area_analysis.txt"
+    local syn_log="$results_dir/synthesis.log"
+
+    local wns="N/A"
+    local tns="N/A"
+    local gates="N/A"
+    local warnings=0
+    local errors=0
+
+    if [[ -f "$timing_rpt" ]]; then
+        wns=$(awk '/Worst path slack:/ {print $(NF-1)$NF; exit}' "$timing_rpt")
+        tns=$(awk '/Total Negative Slack \(TNS\):/ {print $(NF-1)$NF; exit}' "$timing_rpt")
+    fi
+    if [[ -f "$area_rpt" ]]; then
+        # Line format: "  - Total NAND2 equivalent:  37402 gates"
+        # Fields:        $1=- $2=Total $3=NAND2 $4=equivalent: $5=37402 $6=gates
+        local nand2=$(awk '/Total NAND2 equivalent:/ {print $5; exit}' "$area_rpt")
+        if [[ -n "$nand2" && "$nand2" =~ ^[0-9]+$ ]]; then
+            # Bash arithmetic for locale-independent "37.4k" (awk's %.1f honors
+            # LC_NUMERIC, producing "37,4k" under fr/de locales).
+            gates="$((nand2 / 1000)).$((nand2 % 1000 / 100))k"
+        fi
+    fi
+    local waived=0
+    if [[ -f "$syn_log" ]]; then
+        # grep -c always writes a count to stdout; do NOT pair with "|| echo 0"
+        # because grep -c exits 1 when count==0 and the fallback would append
+        # an extra "0" line (yielding "0\n0"). Count both raw `Warning:` and
+        # already-`[WAIVED] Warning:`-prefixed lines so the counts stay
+        # consistent when this helper runs against an already-annotated log
+        # (e.g. on a re-invocation).
+        warnings=$(grep -cE '^(\[WAIVED\] )?Warning:' "$syn_log" 2>/dev/null)
+        errors=$(grep -cE   '^(\[WAIVED\] )?Error:'   "$syn_log" 2>/dev/null)
+        warnings=${warnings:-0}
+        errors=${errors:-0}
+
+        # Count waived warnings against the patterns in ./waivers.txt. The
+        # in-place [WAIVED] annotation of the log file itself happens earlier
+        # in run_one_synthesis (immediately after dc_shell), so this just
+        # tallies. Match is done against the un-prefixed line text so user
+        # patterns don't have to accommodate a `\[WAIVED\] ?` prefix --
+        # keeps the count stable across raw and already-annotated logs.
+        local waived_pattern
+        waived_pattern=$(build_waiver_pattern)
+        if [[ -n "$waived_pattern" ]]; then
+            waived=$(grep -E '^(\[WAIVED\] )?Warning:' "$syn_log" \
+                     | sed 's/^\[WAIVED\] //' \
+                     | grep -cE "$waived_pattern")
+            waived=${waived:-0}
+            warnings=$((warnings - waived))
+        fi
+    fi
+
+    # Param list from rtl_params.tcl snapshotted ALONGSIDE the results, NOT
+    # from the live working-dir copy -- otherwise a later iteration's
+    # gen_rtl_params (or any other tool) can shift what the live file says
+    # between dc_shell and the summary, producing a params field that
+    # doesn't match what dc_shell actually synthesized. Skip MVENDORID
+    # (string-valued, matches sim-sweep convention).
+    local params=""
+    local params_src="$results_dir/rtl_params.tcl"
+    [[ -f "$params_src" ]] || params_src=./rtl_params.tcl  # fallback for legacy snapshots
+    if [[ -f "$params_src" ]]; then
+        params=$(awk '/^set RTL_PARAM_/ && $2 !~ /MVENDORID/ {
+                         sub(/^RTL_PARAM_/, "", $2)
+                         printf "%s%s=%s", (n++?", ":""), $2, $3
+                     } END { print "" }' "$params_src")
+    fi
+
+    printf "Config %s: WNS=%s TNS=%s gates=%s warn=%s err=%s waive=%s  - %s\n" \
+        "$idx_padded" "$wns" "$tns" "$gates" "$warnings" "$errors" "$waived" "$params"
+}
+
+# ----------------------------------------------------------------------------
+# Run one synthesis pass for a given sweep-config index ("" = run_config defaults).
+# Writes outputs to ./results/ (matching existing synthesis.tcl). When invoked
+# from the sweep loop, the caller copies ./results/* to ./results_sweep/<NN>_<label>/
+# after this returns.
+# ----------------------------------------------------------------------------
+run_one_synthesis() {
+    local cfg_idx="$1"    # "" or N
+    local label="$2"      # "" or label string (display only)
+
+    # Ensure the output dir exists (fresh checkout / first run), then clear its
+    # contents for this pass. dc_shell + synthesis.tcl write all reports here.
+    mkdir -p ./results
+    rm -rf ./results/*
+
+    if [[ -n "$cfg_idx" ]]; then
+        echo "Generating RTL parameters for sweep config ${cfg_idx} (${label})..."
+        python3 ./gen_rtl_params.py --rtl-config "$cfg_idx"
+    else
+        echo "Generating RTL parameters from run_config.json defaults..."
+        python3 ./gen_rtl_params.py
+    fi
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to generate RTL parameters" >&2
+        return 1
+    fi
+
+    # -with_sync_reset: force the reset style to synchronous AFTER gen_rtl_params,
+    # so any persona/config can be built with ASYNC_RST_EN=0 without editing
+    # run_config.json. ELABORATE_PARAMS references ${RTL_PARAM_ASYNC_RST_EN}, so
+    # rewriting this one line suffices; the snapshot copy below then records the
+    # forced value too (and check_reset_style_pt.tcl auto-detects EXPECT=sync).
+    if [[ "$FORCE_SYNC_RESET" -eq 1 ]]; then
+        if grep -q '^set RTL_PARAM_ASYNC_RST_EN ' ./rtl_params.tcl; then
+            sed 's/^set RTL_PARAM_ASYNC_RST_EN .*/set RTL_PARAM_ASYNC_RST_EN 0  ;# forced synchronous reset (run_syn -with_sync_reset)/' \
+                ./rtl_params.tcl > ./rtl_params.tcl.tmp && mv ./rtl_params.tcl.tmp ./rtl_params.tcl
+            echo ">>> -with_sync_reset: forcing ASYNC_RST_EN=0 (synchronous reset)."
+        else
+            echo "Error: -with_sync_reset: 'set RTL_PARAM_ASYNC_RST_EN' not found in rtl_params.tcl" >&2
+            return 1
+        fi
+    fi
+    echo ""
+
+    dc_shell-t -f synthesis.tcl | tee ./results/synthesis.log
+    local rc=${PIPESTATUS[0]}
+
+    # Snapshot rtl_params.tcl alongside the dc_shell outputs so print_synth_summary
+    # reports the params dc_shell ACTUALLY synthesized -- not whatever the live
+    # ./rtl_params.tcl says by the time the summary runs (which can drift if a
+    # later sweep iteration regenerates it, or any other tool touches it).
+    [[ -f ./rtl_params.tcl ]] && cp ./rtl_params.tcl ./results/rtl_params.tcl
+
+    # Annotate synthesis.log BEFORE the snapshot copy in the sweep loop, so
+    # [WAIVED] tags land in both ./results/synthesis.log AND every per-config
+    # snapshot at ./results_sweep/<NN>_<label>/synthesis.log (via cp -r below).
+    annotate_waived_log ./results/synthesis.log
+
+    rm -rf ./clog*
+    return $rc
+}
+
+# ----------------------------------------------------------------------------
+# Sanitize a sweep label into a filesystem-safe directory name.
+# (e.g. "corner-LO(all-min)" -> "corner-LO_all-min",
+#       "ofat:C_EXTENSION=0"  -> "ofat_C_EXTENSION_0",
+#       "persona:minimal"     -> "persona_minimal")
+# ":" is converted to "_" (not stripped) so the family prefix and tail stay
+# visually separated; "(" ")" "," still strip silently.
+# ----------------------------------------------------------------------------
+sanitize_label() {
+    echo "$1" | sed -e 's/[(),]//g' -e 's/[ /=:]/_/g'
+}
+
+START_TIME=$SECONDS
+
+if [[ $RTL_SWEEP -eq 1 ]]; then
+    # ------------------------------------------------------------------------
+    # SWEEP MODE: iterate every config in the shared sweep set.
+    # Per-config results land in ./results_sweep/<NN>_<sanitized_label>/.
+    # ------------------------------------------------------------------------
+    mkdir -p ./results_sweep
+    # Get the numbered list from the SAME generator as the sim sweep so
+    # 'config N here' == 'config N in ./run_all -rtl_sweep'. Use while-read
+    # rather than `mapfile` for bash 3 compatibility (macOS default). The
+    # awk filter keeps only `<idx>\t<label>` lines (idx must be numeric),
+    # dropping the legend header that --list-configs prints up front.
+    CONFIGS=()
+    while IFS= read -r line; do
+        CONFIGS+=("$line")
+    done < <(python3 ./gen_rtl_params.py --list-configs | awk -F'\t' '$1 ~ /^[0-9]+$/')
+    total=${#CONFIGS[@]}
+    echo "================================================================"
+    echo " arvern SYNTHESIS SWEEP: $total configs"
+    echo "================================================================"
+
+    SWEEP_FAIL=0
+    SWEEP_SUMMARY_LINES=()
+    for entry in "${CONFIGS[@]}"; do
+        idx="${entry%%	*}"
+        label="${entry#*	}"
+        idx_padded=$(printf '%02d' "$idx")
+        sanitized=$(sanitize_label "$label")
+        outdir="./results_sweep/${idx_padded}_${sanitized}"
+
+        echo ""
+        echo "================================================================"
+        echo " Config ${idx}/${total}: ${label}  ->  ${outdir}"
+        echo "================================================================"
+
+        run_one_synthesis "$idx" "$label"
+        rc=$?
+
+        # Snapshot results regardless of dc_shell rc so the user can triage failures.
+        mkdir -p "$outdir"
+        rm -rf "${outdir:?}"/*
+        cp -r ./results/* "$outdir/" 2>/dev/null || true
+
+        # Per-config one-line summary (read from the freshly-snapshotted dir
+        # so the line is reproducible from disk after the sweep finishes).
+        SWEEP_SUMMARY_LINES+=("$(print_synth_summary "$(printf '%3d' "$idx")" "$outdir")")
+
+        if [[ $rc -ne 0 ]]; then
+            echo "WARNING: dc_shell returned $rc for config ${idx} (${label})"
+            SWEEP_FAIL=$((SWEEP_FAIL + 1))
+        fi
+    done
+
+    echo ""
+    echo "================================================================"
+    echo " RTL Synthesis Sweep Summary"
+    echo "================================================================"
+    for line in "${SWEEP_SUMMARY_LINES[@]}"; do
+        echo "$line"
+    done
+    echo ""
+    echo " Sweep complete: $((total - SWEEP_FAIL))/${total} configs passed dc_shell"
+    echo " Per-config outputs in: ./results_sweep/"
+    echo "================================================================"
+
+elif [[ -n "$RTL_CONFIG" ]]; then
+    # ------------------------------------------------------------------------
+    # ONE OR MORE EXPLICIT CONFIGS: -rtl_config accepts either a 1-based index
+    # (e.g. "14") OR a persona name ("minimal" / "medium" / "full"), in any
+    # mix. Single entry → legacy ./results/. Multi-entry list (e.g. "1,4,15"
+    # or "minimal,medium,full" or "14,minimal") → per-entry snapshot to
+    # ./results_sweep/<idx_padded>_<label>/ for integers or
+    # ./results_sweep/persona_<name>/ for personas, so the runs don't clobber
+    # each other (synthesis is slow -- you don't want to rerun just to recover
+    # an overwritten earlier config).
+    # ------------------------------------------------------------------------
+
+    # Cache both lookup tables once -- (a) the full sweep set for integer
+    # entries, (b) the persona name list for name entries -- then validate
+    # every requested entry upfront so an unknown token errors NOW, not after
+    # a 30-minute synthesis of an earlier valid one.
+    CONFIGS_RAW=$(python3 ./gen_rtl_params.py --list-configs)
+    PERSONAS_RAW=$(python3 ./gen_rtl_params.py --list-personas)
+
+    IFS=',' read -ra REQUESTED <<< "$RTL_CONFIG"
+    SELECTED_LABELS=()   # parallel to REQUESTED; "persona:NAME" or sweep label
+    SELECTED_KIND=()     # parallel: "int" or "persona"
+
+    for c in "${REQUESTED[@]}"; do
+        if [[ "$c" =~ ^[0-9]+$ ]]; then
+            # Integer index -- resolve against the 'all' sweep set.
+            lbl=$(printf '%s\n' "$CONFIGS_RAW" | awk -F'\t' -v n="$c" '$1==n {print $2; exit}')
+            if [[ -z "$lbl" ]]; then
+                echo "Error: -rtl_config $c out of range" >&2
+                python3 ./gen_rtl_params.py --rtl-config "$c"   # propagate the range error message
+                exit 1
+            fi
+            SELECTED_LABELS+=("$lbl")
+            SELECTED_KIND+=("int")
+        elif printf '%s\n' "$PERSONAS_RAW" | grep -Fxq "$c"; then
+            # Persona name -- the label dc_shell sees is the same one the sim
+            # side prints (persona:NAME), so summary lines stay aligned across
+            # sim/synth.
+            SELECTED_LABELS+=("persona:$c")
+            SELECTED_KIND+=("persona")
+        else
+            echo "Error: -rtl_config '$c' is neither an integer sweep index nor a known persona" >&2
+            echo "       Known personas:" >&2
+            printf '         %s\n' $PERSONAS_RAW >&2
+            echo "       Use './run_syn -list_configs' for the integer sweep set." >&2
+            exit 1
+        fi
+    done
+
+    # Helper: build the (column-aligned) summary key for an entry. Integers
+    # get the legacy %3d format; personas get the name left-aligned in the
+    # same 3-char field (no padding needed -- names are >=3 chars).
+    fmt_idx_key() {
+        local kind="$1" tok="$2"
+        if [[ "$kind" == "int" ]]; then
+            printf '%3d' "$tok"
+        else
+            printf '%s'  "$tok"
+        fi
+    }
+
+    # Helper: pick the output dir slot for a multi-entry run. Integer entries
+    # keep the existing "<NN>_<sanitized_label>" form; persona entries land
+    # under "persona_<name>" so the dir name is self-describing without a
+    # synthetic index prefix.
+    pick_outdir() {
+        local kind="$1" tok="$2" label="$3"
+        local sanitized
+        sanitized=$(sanitize_label "$label")
+        if [[ "$kind" == "int" ]]; then
+            printf './results_sweep/%02d_%s' "$tok" "$sanitized"
+        else
+            printf './results_sweep/%s'      "$sanitized"
+        fi
+    }
+
+    if [[ ${#REQUESTED[@]} -eq 1 ]]; then
+        # Single entry -- preserve legacy ./results/ behavior for both forms.
+        tok="${REQUESTED[0]}"
+        kind="${SELECTED_KIND[0]}"
+        label="${SELECTED_LABELS[0]}"
+        echo "================================================================"
+        echo " arvern SYNTHESIS: sweep config ${tok} (${label})"
+        echo "================================================================"
+        run_one_synthesis "$tok" "$label"
+        echo ""
+        print_synth_summary "$(fmt_idx_key "$kind" "$tok")" ./results
+    else
+        # Multi-entry -- iterate exactly like -rtl_sweep but only over the
+        # user-listed subset; snapshot each to ./results_sweep/ and aggregate
+        # a single summary table at the end.
+        mkdir -p ./results_sweep
+        total=${#REQUESTED[@]}
+        echo "================================================================"
+        echo " arvern SYNTHESIS: $total selected configs (-rtl_config $RTL_CONFIG)"
+        echo "================================================================"
+
+        SWEEP_FAIL=0
+        SWEEP_SUMMARY_LINES=()
+        for n in "${!REQUESTED[@]}"; do
+            tok="${REQUESTED[$n]}"
+            kind="${SELECTED_KIND[$n]}"
+            label="${SELECTED_LABELS[$n]}"
+            outdir=$(pick_outdir "$kind" "$tok" "$label")
+            seq=$((n + 1))
+
+            echo ""
+            echo "================================================================"
+            echo " [${seq}/${total}] Config ${tok}: ${label}  ->  ${outdir}"
+            echo "================================================================"
+
+            run_one_synthesis "$tok" "$label"
+            rc=$?
+
+            mkdir -p "$outdir"
+            rm -rf "${outdir:?}"/*
+            cp -r ./results/* "$outdir/" 2>/dev/null || true
+
+            SWEEP_SUMMARY_LINES+=("$(print_synth_summary "$(fmt_idx_key "$kind" "$tok")" "$outdir")")
+
+            if [[ $rc -ne 0 ]]; then
+                echo "WARNING: dc_shell returned $rc for config ${tok} (${label})"
+                SWEEP_FAIL=$((SWEEP_FAIL + 1))
+            fi
+        done
+
+        echo ""
+        echo "================================================================"
+        echo " RTL Synthesis Multi-Config Summary (${total} configs)"
+        echo "================================================================"
+        for line in "${SWEEP_SUMMARY_LINES[@]}"; do
+            echo "$line"
+        done
+        echo ""
+        echo " Done: $((total - SWEEP_FAIL))/${total} configs passed dc_shell"
+        echo " Per-config outputs in: ./results_sweep/"
+        echo "================================================================"
+    fi
+
+else
+    # ------------------------------------------------------------------------
+    # DEFAULT MODE: synthesize run_config.json defaults (== sweep config 1).
+    # ------------------------------------------------------------------------
+    run_one_synthesis "" ""
+    echo ""
+    # Defaults map 1:1 to sweep "default" (config 1) — print with that label
+    # so the summary line is consistent with the -rtl_config / -rtl_sweep cases.
+    print_synth_summary "  1" ./results
+fi
+
+ELAPSED=$(( SECONDS - START_TIME ))
+HOURS=$(( ELAPSED / 3600 ))
+MINUTES=$(( (ELAPSED % 3600) / 60 ))
+SECS=$(( ELAPSED % 60 ))
+echo ""
+echo "Synthesis completed in ${HOURS}h ${MINUTES}m ${SECS}s"

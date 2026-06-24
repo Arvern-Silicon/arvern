@@ -1,0 +1,71 @@
+#----------------------------------------------------------------------------
+#          _    _           Family:    aRVern System IPs
+#         / \__/ \          Module:    waivers
+#        /   /\   \         --------------------------------------------
+#    ===/   /=========      Copyright: (c) 2026, aRVern-dev
+#      /   / RV \   \       Contact:   arvernsilicon@gmail.com
+#     /___/______\___\      GitHub:    https://github.com/Arvern-Silicon
+#
+# SPDX-License-Identifier: BSD-3-Clause
+# Full license text is available in the LICENSE file at the repository root.
+#----------------------------------------------------------------------------
+# File Name          : waivers.txt
+# Module Description : Synthesis-message waivers (one filter pattern per line).
+#----------------------------------------------------------------------------
+
+# Synthesis warning waivers
+# ============================================================================
+# Each non-comment, non-blank line is an extended-regex pattern (grep -E)
+# applied against the full text of each `^Warning:` line in synthesis.log.
+# Any matching line counts toward `waived=N` in the RTL synthesis summary
+# instead of toward `warnings=N`. PASS/FAIL is unaffected (errors are not
+# waivable; only the noise floor is filtered).
+#
+# Syntax
+# ------
+#   - Lines starting with `#`         → ignored (full-line comment).
+#   - Blank lines                     → ignored.
+#   - Trailing ` #note`               → inline comment, stripped before match
+#                                       (use a SPACE before `#` to mark it).
+#   - Otherwise the line is a regex   → use `^`/`$` to anchor, `\.` for a
+#                                       literal dot, `|` for alternation.
+#   - Leading/trailing whitespace     → trimmed.
+#
+# How targeted should a waiver be?
+# --------------------------------
+#   - LOOSE   `VER-61`                          matches the substring "VER-61"
+#                                               anywhere in the Warning line.
+#                                               Easy to write, but a future
+#                                               unrelated warning that happens
+#                                               to mention "VER-61" would also
+#                                               be silently waived.
+#   - TIGHT   `^Warning:.*\(VER-61\)$`          matches the full DC message
+#                                               format. Recommended when the
+#                                               warning text has a clear
+#                                               anchored pattern.
+#   - VERBATIM
+#             `^Warning: Design 'arvern' contains [0-9]+ high-fanout nets`
+#                                               matches exact wording with
+#                                               a digit-count wildcard.
+#                                               Most precise; survives DC
+#                                               version drift only in the
+#                                               wildcarded portions.
+# ============================================================================
+
+# --- High-fanout net (>=1000 fanout): Synopsys uses 1000 as the delay-calc
+# fanout. Informational, usually clock/reset or a global enable.
+^Warning: Design '[^']+' contains [0-9]+ high-fanout nets.*\(TIM-134\)
+
+# --- DesignWare synthetic library auto-added to synthetic_library on every
+# `elaborate`. Informational.
+^Warning: DesignWare synthetic library .* added to the synthetic_library.*\(UISN-40\)
+
+# --- `check_timing` flags GTECH pseudo-pins (synch_enable, next_state) at
+# PRE-compile: those pins are temporary intermediate primitives that get
+# replaced with proper library cells (with full clock arcs) after
+# compile_ultra, so the warning is a false positive at sign-off time. NOTE:
+# this pattern ALSO matches the post-compile `check_timing` version of the
+# same template (same text). To rely on the post-compile diagnostic, remove
+# this waiver and drop the pre-compile `check_timing` redirect in
+# synthesis.tcl (~L60).
+^Warning: The following end-points are not constrained for maximum delay\.$

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Wrapper — create a named benchmark snapshot from the run directory.
+# Usage:
+#   ./bench_snapshot <name>
+#   ./bench_snapshot <name> --desc "description"
+#   ./bench_snapshot <name> --force
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
+PYTHONPATH="$BIN_DIR${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m benchmark_trace_tools.bench_snapshot "$@"

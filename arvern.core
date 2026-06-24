@@ -1,0 +1,56 @@
+CAPI=2:
+
+# ----------------------------------------------------------------------------
+#          _    _           Family:    aRVern System IPs
+#         / \__/ \          File:      arvern.core
+#        /   /\   \         --------------------------------------------
+#    ===/   /=========      Copyright: (c) 2026, aRVern-dev
+#      /   / RV \   \       Contact:   arvernsilicon@gmail.com
+#     /___/______\___\      GitHub:    https://github.com/Arvern-Silicon
+#
+# SPDX-License-Identifier: BSD-3-Clause
+# ----------------------------------------------------------------------------
+# FuseSoC manifest for external integration of the arvern CPU.  The
+# CPU is fully self-contained at the RTL level: its ccsr_* ports are
+# an integration interface (an SoC integrator wires up arv_custom_csr
+# or any other compliant peripheral); setting parameter CCSR_EN=0
+# disables the interface entirely.
+#
+# Native sim / regression flow is under sim/rtl_sim/run/ (see
+# CLAUDE.md).  This .core is intentionally not involved in that
+# path — it's purely for external SoC integration:
+#
+#   fusesoc library add aRVern <path-to-arvern>
+#   fusesoc run --target=lint --setup arvern:cpu:arvern
+# ----------------------------------------------------------------------------
+
+name: arvern:cpu:arvern:1.0
+description: "arvern RV32I/E CPU core (M, B, C extensions; S/M/U privilege; Smrnmi NMI; Zicntr/Zihpm counters)."
+
+filesets:
+  rtl:
+    file_type: verilogSource
+    files:
+      - rtl/verilog/arvern.v
+      - rtl/verilog/arv_fetch.v
+      - rtl/verilog/arv_decode.v
+      - rtl/verilog/arv_uop_sequencer.v
+      - rtl/verilog/arv_int_registers.v
+      - rtl/verilog/arv_csr_top.v
+      - rtl/verilog/arv_csr_cntr.v
+      - rtl/verilog/arv_csr_hpm.v
+      - rtl/verilog/arv_csr_ids.v
+      - rtl/verilog/arv_csr_traps.v
+      - rtl/verilog/arv_alu.v
+      - rtl/verilog/arv_alu_muldiv.v
+      - rtl/verilog/arv_load_store.v
+
+targets:
+  default: &default
+    filesets: [rtl]
+
+  lint:
+    <<: *default
+    flow: lint
+    flow_options: {tool: verilator}
+    toplevel: arvern

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Launch the arvern trace viewer.
+# Optionally pre-processes any stale/new traces before opening the browser.
+#
+# Usage (from sim/rtl_sim/run/):
+#   ./benchmark_trace_viewer                 # preprocess stale traces, then launch
+#   ./benchmark_trace_viewer --no-preprocess # skip preprocessing, launch immediately
+#   ./benchmark_trace_viewer --workers 4     # preprocess with 4 parallel workers
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN_DIR="$SCRIPT_DIR/../bin"
+TRACES_DIR="$SCRIPT_DIR/benchmark_traces/latest"
+
+# Use the virtualenv python if it exists, otherwise fall back to python3
+VENV="$HOME/arvern_env"
+if [ -x "$VENV/bin/python" ]; then
+    PYTHON="$VENV/bin/python"
+else
+    PYTHON="python3"
+fi
+
+export PYTHONPATH="$BIN_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
+PREPROCESS=1
+SUMMARY_ONLY=0
+PREPROCESS_ARGS=(--workers 4)
+
+for arg in "$@"; do
+    case "$arg" in
+        --no-preprocess) PREPROCESS=0 ;;
+        --summary)       SUMMARY_ONLY=1; PREPROCESS_ARGS+=("$arg") ;;
+        *)               PREPROCESS_ARGS+=("$arg") ;;
+    esac
+done
+
+if [ "$SUMMARY_ONLY" -eq 1 ]; then
+    "$PYTHON" -m benchmark_trace_tools.preprocess --dir "$TRACES_DIR" ${PREPROCESS_ARGS[@]+"${PREPROCESS_ARGS[@]}"}
+    exit 0
+fi
+
+if [ "$PREPROCESS" -eq 1 ]; then
+    echo "Preprocessing traces in $TRACES_DIR ..."
+    "$PYTHON" -m benchmark_trace_tools.preprocess --dir "$TRACES_DIR" ${PREPROCESS_ARGS[@]+"${PREPROCESS_ARGS[@]}"}
+    echo ""
+fi
+
+echo "Starting trace viewer  →  http://localhost:8501"
+"$PYTHON" -m streamlit run "$BIN_DIR/benchmark_trace_tools/viewer/app.py"

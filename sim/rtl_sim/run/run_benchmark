@@ -1,0 +1,19 @@
+#!/bin/bash
+#------------------------------------------------------------------------------
+# Benchmark Runner — run benchmarks and save execution traces.
+#
+# Usage Examples:
+#   ./run_benchmark embench_statemate
+#   ./run_benchmark embench_wikisort -c_mode
+#   ./run_benchmark coremark
+#   ./run_benchmark embench_st -all
+#   ./run_benchmark -a                             # run ALL benchmarks
+#
+# Traces are saved to: benchmark_traces/latest/
+#------------------------------------------------------------------------------
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+BIN_DIR="${SCRIPT_DIR}/../bin"
+
+# Run the Python module with all arguments
+PYTHONPATH="$BIN_DIR${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m benchmark_trace_tools.store_benchmark "$@"

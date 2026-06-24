@@ -1,0 +1,105 @@
+#!/bin/bash
+#
+# Single Test Runner Wrapper
+#
+# This script runs individual tests (assembly or C-based) with waveform dumping enabled.
+# It wraps runsim.py with appropriate environment variables for single test mode.
+#
+# Usage Examples:
+#   ./run inst_add                           # Run inst_add test once (standard mode)
+#   ./run inst_add -c_mode                   # Run inst_add in compressed instruction mode
+#   ./run inst_add -all                      # Run inst_add with all 32 timing variants
+#   ./run inst_add -all -n 5                 # Run inst_add with all 32 variants, 5 iterations
+#   ./run inst_add -rwsrom -rsalu            # Run with random ROM wait states and ALU stalls
+#   ./run inst_add -seed 12345               # Run with specific seed (reproducible)
+#   ./run inst_add -rtl_config 14            # Build sweep config #14's RTL, run inst_add (reproduce a sweep failure)
+#   ./run inst_add -rtl_config 14 -rsalu -seed 4242  # ...with the exact failing variant + seed
+#   ./run inst_add inst_mul -all             # Run two tests with all 32 timing variants each
+#   ./run inst_add inst_mul inst_lui -all    # Run three tests with all 32 timing variants each
+#   ./run inst_add inst_mul -all -j 2        # Run two tests in parallel with all variants
+#   ./run inst_add -nodump                   # Run without generating VCD waveform file
+#   ./run hello_world                        # Run C-based test (from src-c/)
+#   ./run coremark -all                      # Run CoreMark with all variants
+#   ./run coremark -all -n 3                 # Run CoreMark with all variants, 3 iterations
+#
+# Available Arguments:
+#
+#   Test Selection:
+#     <testname>           Name of test (default: sandbox)
+#                          - Assembly tests from ../src/ (e.g., inst_add, inst_lui)
+#                          - C tests from ../src-c/ (e.g., hello_world, coremark, dhrystone_v2.1)
+#
+#   Instruction Mode:
+#     -c_mode              Use compressed (16-bit) instructions (requires C_EXTENSION=1)
+#                          Default: standard 32-bit instructions
+#
+#   Execution Mode:
+#     -all                 Run all timing variants (includes all combinations below)
+#     -n N                 Number of iterations when using -all (default: 1)
+#                          Run test multiple times to catch intermittent failures
+#     -j N                 Number of tests to run in parallel (default: 1)
+#                          Each test runs in its own work directory under run/WORK/
+#     -rtl_sweep           Run test with all RTL configuration combinations
+#     -rtl_config N        Build ONLY sweep config #N's RTL, then run the
+#                          test(s) (1-based, same numbering as ./run_all
+#                          -rtl_sweep / -rtl_config). Use this to reproduce a
+#                          sweep failure under that exact RTL config. For a
+#                          single test it streams the execution log to the
+#                          console AND dumps the waveform (tb_arvern.vcd +
+#                          asphalt.log in run/) by default for debugging.
+#                          Combinable with timing variant flags, -seed, -all.
+#
+#   Timing Variants (single test mode):
+#     -rwsrom              Random wait states on ROM
+#     -wsrom               Fixed wait states on ROM
+#     -rwsram              Random wait states on SRAM
+#     -wssram              Fixed wait states on SRAM
+#     -rwsper              Random wait states on peripherals
+#     -wsper               Fixed wait states on peripherals
+#     -rsalu               Random ALU stalls
+#     -salu                Fixed ALU stalls
+#     -gahb                Use generic AHB instead of high-performance AHB
+#
+#   Reproducibility:
+#     -seed N              Specify random seed for reproducibility
+#
+#   Waveform Control:
+#     -nodump              Disable VCD waveform file generation (faster, saves disk space)
+#                          Default: waveform dumping enabled
+#
+#   Information:
+#     -list                List all available tests (assembly and C)
+#     -h, --help           Show detailed help message
+#
+# Environment Variables (configured below):
+#   VERILOG_SIMULATOR    Simulator to use (iverilog, verilator, vcs, vsim, etc.)
+#
+
+# Parse arguments to check for -nodump flag
+SIMULATION_NODUMP=0
+FILTERED_ARGS=()
+
+for arg in "$@"; do
+    if [ "$arg" = "-nodump" ]; then
+        SIMULATION_NODUMP=1
+    else
+        FILTERED_ARGS+=("$arg")
+    fi
+done
+
+export SIMULATION_NODUMP
+
+# Choose simulator:
+#   - iverilog  : Icarus Verilog  (default)
+#   - verilator : Verilator
+#   - cver      : CVer
+#   - verilog   : Verilog-XL
+#   - ncverilog : NC-Verilog
+#   - vcs       : VCS
+#   - vsim      : Modelsim
+#   - isim      : Xilinx simulator
+VERILOG_SIMULATOR=iverilog
+export VERILOG_SIMULATOR
+
+# Run the test
+../bin/runsim.py "${FILTERED_ARGS[@]}"

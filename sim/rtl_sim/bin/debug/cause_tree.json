@@ -1,0 +1,50 @@
+{
+  "trap_taken": {
+    "desc": "trap_pending_o & trap_drained",
+    "causes": ["trap_pending_o", "trap_drained"]
+  },
+  "trap_drained": {
+    "desc": "pipeline_drained_for_irq & ~trap_branch_detect_r",
+    "causes": ["pipeline_drained_for_irq", "trap_branch_detect_r"]
+  },
+  "pipeline_drained_for_irq": {
+    "desc": "(ex_alu_ready | trap_kill_muldiv_o) & ex_ldst_ready & ex_csr_ready & ex_uop_ready & wb_ldst_ready",
+    "causes": ["ex_alu_ready_o", "ex_ldst_ready_o", "ex_csr_ready_o", "ex_uop_ready_o", "wb_ldst_ready_o"]
+  },
+  "pipeline_drained_for_id": {
+    "desc": "ex_ready & wb_ready",
+    "causes": ["ex_alu_ready_o", "ex_ldst_ready_o", "ex_csr_ready_o", "ex_uop_ready_o", "wb_ldst_ready_o"]
+  },
+  "irq_detect": {
+    "desc": "|(irq_vector_cause) & ~csr_irq_config_wr & ~irq_suppress_post_mret",
+    "causes": ["irq_vector_cause", "irq_suppress_post_mret", "mstatus_mie", "irq_software_i"]
+  },
+  "trap_pending_o": {
+    "desc": "register: set by trap_pending_set, cleared by trap_branch_detect_r",
+    "causes": ["irq_detect", "excp_detect", "trap_branch_detect_r", "irq_suppress_post_mret"]
+  },
+  "irq_suppress_post_mret": {
+    "desc": "register: set by mret_taken & irqkill_cfg[2], cleared by irq_suppress_clr",
+    "causes": ["irq_suppress_clr", "mret_taken", "mstatus_mie"]
+  },
+  "irq_suppress_clr": {
+    "desc": "irq_suppress_post_mret & id_instruction_valid_i & pipeline_drained_for_id & ~trap_branch_detect_r",
+    "causes": ["pipeline_drained_for_id", "id_instruction_valid_o", "trap_branch_detect_r"]
+  },
+  "trap_stall_o": {
+    "desc": "(trap_stall_raw | trap_branch_detect_r) & ~ex_uop_has_branch_i",
+    "causes": ["trap_stall_raw", "trap_branch_detect_r"]
+  },
+  "trap_stall_raw": {
+    "desc": "trap_pending_o | (irq_detect | excp_detect_in_ex | excp_detect_in_wb)",
+    "causes": ["trap_pending_o", "irq_detect", "excp_detect_in_ex", "excp_detect_in_wb"]
+  },
+  "wb_ldst_ready_o": {
+    "desc": "!dph_wait = !(dph_ongoing & !data_hready_i)",
+    "causes": ["dph_ongoing", "data_hready_i"]
+  },
+  "ex_ldst_ready_o": {
+    "desc": "load/store address phase ready",
+    "causes": ["start_load", "start_store", "data_hready_i"]
+  }
+}

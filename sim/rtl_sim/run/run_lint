@@ -1,0 +1,5 @@
+#!/bin/bash
+# Thin shim -> bin/run_lint.py (single Python owner of lint + the
+# parameterization sweep). Defaults (filelist/waivers/run_config) stay
+# cwd-relative, so run this from sim/rtl_sim/run/ as before.
+exec python3 "$(dirname "$0")/../bin/run_lint.py" "$@"

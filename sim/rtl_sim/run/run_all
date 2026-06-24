@@ -1,0 +1,112 @@
+#!/bin/bash
+#
+# Regression Suite Runner Wrapper
+#
+# This script runs the full regression suite with all enabled tests.
+# Waveform dumping is disabled by default to speed up execution.
+# All enabled tests are run with all 32 timing variants by default.
+#
+# Usage Examples:
+#   ./run_all                                    # Run one regression iteration (all 32 variants)
+#   ./run_all -n 5                               # Run 5 regression iterations
+#   ./run_all -j 4                               # Run tests in parallel (4 workers)
+#   ./run_all -j 4 -n 5                          # Parallel with 5 iterations
+#   ./run_all -fast                              # Run with only base variant (fast, ~32x faster)
+#   ./run_all -fast -n 3                         # Fast mode with 3 iterations
+#   ./run_all -fast -rirq -j 4                   # Run all tests with random IRQ variant, 4 workers
+#   ./run_all -fast -rwsrom -rsalu               # Run all tests with specific variant
+#   ./run_all --stop-on-fail                     # Stop at first failing test (for debugging)
+#   ./run_all --report-show-all                  # Show all tests in report (not just failures)
+#   ./run_all -rtl_sweep                         # Run regression with all RTL configurations
+#   ./run_all -rtl_sweep --stop-on-fail          # Stop at first failure in sweep
+#   ./run_all -rtl_config 14                     # Re-run ONLY sweep config #14 (debug a config a sweep flagged)
+#   ./run_all -list                              # List enabled tests only
+#   ./run_all -dryrun                            # Show what would be run without executing
+#
+# Available Arguments:
+#
+#   Execution Control:
+#     -n N                 Number of regression iterations (default: 1)
+#                          Each iteration runs all enabled tests with all variants
+#     -j N                 Number of tests to run in parallel (default: 1)
+#                          Each test runs in its own work directory under run/WORK/
+#     -fast                Run only base variant (no timing variations)
+#                          Makes regression ~32x faster - useful for quick sanity checks
+#     --stop-on-fail       Stop immediately after first test that fails any variant
+#                          Useful for debugging - saves time by not running remaining tests
+#     --report-show-all    Show all tests in detailed report (default: only failures/timeouts)
+#                          By default, only failed and timeout tests are shown to focus on issues
+#
+#   RTL Configuration:
+#     -rtl_sweep           Run regression across the shared RTL parameterization sweep
+#                          (default/corners/ofat/xprod, identical to `run_lint --sweep`;
+#                          single source of truth bin/rtl_sweep_configs.py). Per-config
+#                          tests are filtered by their "requires" expression.
+#                          Automatically skips tests that don't meet requirements
+#     -rtl_config N        Run ONLY sweep config #N (1-based, identical numbering
+#                          to -rtl_sweep). Companion to -rtl_sweep: after a sweep
+#                          flags config N, swap -rtl_sweep for -rtl_config N to
+#                          re-run just that one config (same banner / log / index).
+#
+#   Information:
+#     -list                List enabled tests only (doesn't run anything)
+#     -dryrun              Show what would be run without executing
+#                          Displays enabled tests and total execution count
+#     -h, --help           Show detailed help message
+#
+# Test Configuration:
+#   Tests are configured in run_config.json:
+#   - "enabled": true/false          # Enable or disable test
+#   - "mode": "STD", "COMP", "BOTH"  # Instruction mode(s) to test
+#   - "requires": "expression"       # RTL requirements (for -rtl_sweep)
+#   - "description": "..."           # Test description
+#
+# Environment Variables (configured below):
+#   SIMULATION_NODUMP         1 = disable waveform dumping (default for regression)
+#                             0 = enable waveform dumping (very slow, huge files)
+#   VERILOG_SIMULATOR         Simulator to use (iverilog, verilator, vcs, vsim, etc.)
+#   REGRESSION_SINGLE_VARIANT 1 = run only base variant (set by -fast flag)
+#                             0 = run all 32 timing variants (default)
+#
+# Output:
+#   - Results logged to ./log/<iteration>/<test>-<mode>-<variant>.log
+#   - Summary written to ./log/summary.<iteration>.log
+#   - Multi-iteration summary in ./log/../regressions_summary.log
+#   - Final pass/fail summary printed to console
+#
+
+# Parse arguments to check for -fast flag
+REGRESSION_SINGLE_VARIANT=0
+FILTERED_ARGS=()
+
+for arg in "$@"; do
+    if [ "$arg" = "-fast" ] || [ "$arg" = "--single-variant" ]; then
+        REGRESSION_SINGLE_VARIANT=1
+    else
+        FILTERED_ARGS+=("$arg")
+    fi
+done
+
+# Export environment variables
+export REGRESSION_SINGLE_VARIANT
+
+# Disable waveform dumping and trace logging for regression (speeds up execution significantly)
+SIMULATION_NODUMP=1
+export SIMULATION_NODUMP
+SIMULATION_NOTRACE=1
+export SIMULATION_NOTRACE
+
+# Choose simulator:
+#   - iverilog  : Icarus Verilog  (default)
+#   - verilator : Verilator
+#   - cver      : CVer
+#   - verilog   : Verilog-XL
+#   - ncverilog : NC-Verilog
+#   - vcs       : VCS
+#   - vsim      : Modelsim
+#   - isim      : Xilinx simulator
+VERILOG_SIMULATOR=iverilog
+export VERILOG_SIMULATOR
+
+# Run regression suite (pass filtered arguments without -fast)
+../bin/runsim.py -regression "${FILTERED_ARGS[@]}"

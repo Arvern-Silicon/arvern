@@ -1,0 +1,254 @@
+#----------------------------------------------------------------------------
+#          _    _           Family:    aRVern System IPs
+#         / \__/ \          Test:      inst_zbb_ror
+#        /   /\   \         --------------------------------------------
+#    ===/   /=========      Copyright: (c) 2026, aRVern-dev
+#      /   / RV \   \       Contact:   arvernsilicon@gmail.com
+#     /___/______\___\      GitHub:    https://github.com/Arvern-Silicon
+#
+# SPDX-License-Identifier: BSD-3-Clause
+# Full license text is available in the LICENSE file at the repository root.
+#----------------------------------------------------------------------------
+# Description: ROR (Zbb)
+#----------------------------------------------------------------------------
+
+.section .text
+.global main
+
+main:
+	jal t0, _random_irq_init
+	li  t0, 0
+
+    #-------------------------------------------------
+    # INITIAL REGISTER SETUP - PREPARE TEST DATA
+    #-------------------------------------------------
+
+    # ROR operation: rd = (rs1 >> rs2[4:0]) | (rs1 << (32 - rs2[4:0]))
+    # Rotates rs1 right by rs2[4:0] bit positions
+    # Bits shifted out from the right are rotated into the left
+
+    # Test data with various patterns
+    li  x1,  0x00000000  # All zeros
+    li  x2,  0xFFFFFFFF  # All ones
+    li  x3,  0x80000000  # Single bit at position 31
+    li  x4,  0x00000001  # Single bit at position 0
+    li  x5,  0xAAAAAAAA  # Alternating bits (10101010...)
+    li  x6,  0x55555555  # Alternating bits (01010101...)
+    li  x7,  0x12345678  # Mixed pattern
+    li  x8,  0xDEADBEEF  # Mixed pattern
+    li  x9,  0xF0F0F0F0  # Nibble pattern
+    li  x10, 0x0F0F0F0F  # Nibble pattern
+
+    # Signal initial setup complete
+    li   x31, 0xDEADBEEF
+    nop
+
+    #-------------------------------------------------
+    # TEST ROR (Rotate Right) INSTRUCTION
+    # Format: ror rd, rs1, rs2
+    # Operation: rd = (rs1 >> rs2[4:0]) | (rs1 << (32 - rs2[4:0]))
+    # Encoding: 0110000 rs2[4:0] rs1[4:0] 101 rd[4:0] 0110011
+    #-------------------------------------------------
+
+    # Test 1: Rotate all zeros by any amount -> 0x00000000
+    # ror x11, x1, x4 (0x00000000 >> 1)
+    # Expected: 0x00000000
+    li  x4, 1
+    ror x11, x1, x4
+
+    # Test 2: Rotate all ones by any amount -> 0xFFFFFFFF
+    # ror x12, x2, x4 (0xFFFFFFFF >> 1)
+    # Expected: 0xFFFFFFFF
+    ror x12, x2, x4
+
+    # Test 3: Rotate single bit at position 0 by 1 -> bit moves to position 31
+    li  x4, 0x00000001
+    # ror x13, x4, x4 (0x00000001 >> 1)
+    # Expected: 0x80000000
+    ror x13, x4, x4
+
+    # Test 4: Rotate single bit at position 31 by 1 -> bit moves to position 30
+    li  x4, 1
+    # ror x14, x3, x4 (0x80000000 >> 1)
+    # Expected: 0x40000000
+    ror x14, x3, x4
+
+    # Test 5: Rotate 0xAAAAAAAA by 1 -> 0x55555555
+    # ror x15, x5, x4 (0xAAAAAAAA >> 1)
+    # Expected: 0x55555555
+    ror x15, x5, x4
+
+    # Test 6: Rotate 0x55555555 by 1 -> 0xAAAAAAAA
+    # ror x16, x6, x4 (0x55555555 >> 1)
+    # Expected: 0xAAAAAAAA
+    ror x16, x6, x4
+
+    # Test 7: Rotate 0x12345678 by 0 -> unchanged
+    li  x4, 0
+    # ror x17, x7, x4 (0x12345678 >> 0)
+    # Expected: 0x12345678
+    ror x17, x7, x4
+
+    # Test 8: Rotate 0x12345678 by 4 -> 0x81234567
+    li  x4, 4
+    # ror x18, x7, x4 (0x12345678 >> 4)
+    # Expected: 0x81234567
+    ror x18, x7, x4
+
+    # Test 9: Rotate 0x12345678 by 8 -> 0x78123456
+    li  x4, 8
+    # ror x19, x7, x4 (0x12345678 >> 8)
+    # Expected: 0x78123456
+    ror x19, x7, x4
+
+    # Test 10: Rotate 0x12345678 by 16 -> 0x56781234 (swap halfwords)
+    li  x4, 16
+    # ror x20, x7, x4 (0x12345678 >> 16)
+    # Expected: 0x56781234
+    ror x20, x7, x4
+
+    # Test 11: Rotate 0x00000001 by 4 -> 0x10000000
+    li  x3, 0x00000001
+    li  x4, 4
+    # ror x21, x3, x4 (0x00000001 >> 4)
+    # Expected: 0x10000000
+    ror x21, x3, x4
+
+    # Test 12: Rotate 0x80000000 by 31 -> 0x00000001
+    li  x3, 0x80000000
+    li  x4, 31
+    # ror x22, x3, x4 (0x80000000 >> 31)
+    # Expected: 0x00000001
+    ror x22, x3, x4
+
+    # Test 13: Rotate 0xDEADBEEF by 4 -> 0xFDEADBEE
+    li  x4, 4
+    # ror x23, x8, x4 (0xDEADBEEF >> 4)
+    # Expected: 0xFDEADBEE
+    ror x23, x8, x4
+
+    # Test 14: Rotate 0xDEADBEEF by 8 -> 0xEFDEADBE
+    li  x4, 8
+    # ror x24, x8, x4 (0xDEADBEEF >> 8)
+    # Expected: 0xEFDEADBE
+    ror x24, x8, x4
+
+    # Test 15: Rotate 0xDEADBEEF by 16 -> 0xBEEFDEAD
+    li  x4, 16
+    # ror x25, x8, x4 (0xDEADBEEF >> 16)
+    # Expected: 0xBEEFDEAD
+    ror x25, x8, x4
+
+    # Test 16: Rotate 0xF0F0F0F0 by 4 -> 0x0F0F0F0F
+    li  x4, 4
+    # ror x26, x9, x4 (0xF0F0F0F0 >> 4)
+    # Expected: 0x0F0F0F0F
+    ror x26, x9, x4
+
+    # Test 17: Rotate 0x0F0F0F0F by 4 -> 0xF0F0F0F0
+    li  x4, 4
+    # ror x27, x10, x4 (0x0F0F0F0F >> 4)
+    # Expected: 0xF0F0F0F0
+    ror x27, x10, x4
+
+    # Test 18: Rotate 0x12345678 by 32 -> same as by 0 (only lower 5 bits used)
+    li  x4, 32
+    # ror x28, x7, x4 (0x12345678 >> 32, but 32 & 0x1F = 0)
+    # Expected: 0x12345678
+    ror x28, x7, x4
+
+    # Test 19: Rotate 0x12345678 by 33 -> same as by 1 (33 & 0x1F = 1)
+    li  x4, 33
+    # ror x29, x7, x4 (0x12345678 >> 33, but 33 & 0x1F = 1)
+    # Expected: 0x091A2B3C
+    ror x29, x7, x4
+
+    # Test 20: Rotate 0xAAAAAAAA by 16 -> 0xAAAAAAAA (symmetric pattern)
+    li  x4, 16
+    # ror x30, x5, x4 (0xAAAAAAAA >> 16)
+    # Expected: 0xAAAAAAAA
+    ror x30, x5, x4
+
+    # Test 21: Rotate 0x80000000 by 16 -> 0x00008000
+    li  x1, 0x80000000
+    li  x4, 16
+    # ror x1, x1, x4
+    # Expected: 0x00008000
+    ror x1, x1, x4
+
+    # Test 22: Rotate 0x00000001 by 16 -> 0x00010000
+    li  x2, 0x00000001
+    li  x4, 16
+    # ror x2, x2, x4
+    # Expected: 0x00010000
+    ror x2, x2, x4
+
+    # Test 23: Rotate 0x12345678 by 12 -> 0x67812345
+    li  x3, 0x12345678
+    li  x4, 12
+    # ror x3, x3, x4
+    # Expected: 0x67812345
+    ror x3, x3, x4
+
+    # Test 24: Rotate 0xFFFF0000 by 8 -> 0x00FFFF00
+    li  x4, 0xFFFF0000
+    li  x5, 8
+    # ror x4, x4, x5
+    # Expected: 0x00FFFF00
+    ror x4, x4, x5
+
+    # Test 25: Rotate 0x0000FFFF by 8 -> 0xFF0000FF
+    li  x5, 0x0000FFFF
+    li  x6, 8
+    # ror x5, x5, x6
+    # Expected: 0xFF0000FF
+    ror x5, x5, x6
+
+    # Test 26: Rotate 0x0000000F by 4 -> 0xF0000000
+    li  x6, 0x0000000F
+    li  x7, 4
+    # ror x6, x6, x7
+    # Expected: 0xF0000000
+    ror x6, x6, x7
+
+    # Test 27: Rotate 0xF0000000 by 28 -> 0x0000000F
+    li  x7, 0xF0000000
+    li  x8, 28
+    # ror x7, x7, x8
+    # Expected: 0x0000000F
+    ror x7, x7, x8
+
+    # Test 28: Rotate 0x80000007 by 1 -> 0xC0000003
+    li  x8, 0x80000007
+    li  x9, 1
+    # ror x8, x8, x9
+    # Expected: 0xC0000003
+    ror x8, x8, x9
+
+    # Test 29: Rotate 0xC0000000 by 30 -> 0x00000003
+    li  x9, 0xC0000000
+    li  x10, 30
+    # ror x9, x9, x10
+    # Expected: 0x00000003
+    ror x9, x9, x10
+
+    # Test 30: Rotate 0x12345678 by 24 -> 0x34567812
+    li  x10, 0x12345678
+    li  x31, 24
+    # ror x10, x10, x31
+    # Expected: 0x34567812
+    ror x10, x10, x31
+
+    #-------------------------------------------------
+    # END OF TEST
+    #-------------------------------------------------
+
+    # Ensure all operations complete before marking test done
+    fence
+
+    # Mark test complete
+    li  x31, 0x12345678
+
+end_of_test:
+    nop
+    j end_of_test     # infinite loop
