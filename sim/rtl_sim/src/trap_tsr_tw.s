@@ -22,6 +22,8 @@
 #   a0 = 1  ->  return to M-mode (set MPP = 11)
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -150,6 +152,7 @@ m_handler_done:
     #=================================================================
  _start:
     li   sp, 0x80010000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000        # Scratchpad base
 
     # Zero scratchpad
@@ -173,6 +176,11 @@ m_handler_done:
     la   t0, m_trap_handler
     csrw mtvec, t0
 
+    # Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+    # resets to 0, so boot code must set mnstatus.NMIE=1 before any
+    # ordinary interrupt can be delivered. Smrnmi is unconditional.
+    csrsi 0x744, 8              # mnstatus.NMIE = 1
+
     # Initialize callee-saved registers
     li   s2, 0xAAAAAAAA
     li   s3, 0xBBBBBBBB
@@ -190,6 +198,9 @@ m_handler_done:
 
     # Set MSTATUS.TSR = 1 (bit 22)
     li   t0, (1 << 22)
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Set MPP = 01 (S-mode), MPIE = 1

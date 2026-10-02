@@ -17,8 +17,9 @@
 //   If the LSU gated exception emission on rd!=0, then `lw x0, 0(rs1)` would
 //   become a side-effect-free address-probe primitive. This test proves no
 //   such gate exists by:
-//   Phase A: lw x0, 0(x11) where x11 = unmapped addr -> cause 5 (LAF)
-//   Phase B: lw x0, 0(x11) where x11 = misaligned    -> cause 4 (LAM)
+//   Phase A: lw x0, 0(x11) where x11 = unmapped addr -> RNMI (mncause 3)
+//   Phase B: lw x0, 0(x11) where x11 = misaligned    -> cause 4 (LAM), still
+//            a synchronous exception: only causes 5 and 7 moved to RNMI.
 //   The trap handler counts each entry. We then check the counters match the
 //   number of faulting loads issued.
 //----------------------------------------------------------------------------
@@ -38,6 +39,20 @@ initial begin
     error_on_exception = 0;
 
     @(probes_cpu.x31 == 32'hFFFFFFFF);
+    repeat(3) @(posedge free_clk);
+
+    begin : program_vector
+       reg [31:0] handler_addr;
+       handler_addr = ahb_bus_system_inst.sram_x_inst.mem[0];
+       if (handler_addr == 32'h0) begin
+          $display("ERROR: nmi_handler address not published %t ns", $time);
+          error = error + 1;
+       end else begin
+          $display("PASS:  nmi_vector programmed to 0x%h %t ns", handler_addr, $time);
+       end
+    end
+
+    @(probes_cpu.x31 == 32'hEEEEEEEE);
 
     /* ----- Phase A: lw x0, 0(unmapped) must trap (cause 5) ----- */
     @(probes_cpu.x31 == 32'h11111111);

@@ -81,6 +81,9 @@ main:
     # csr_irq_config_wr doesn't include mip_wr. Phantom MEI trap.
     # Post-fix: csr_irq_config_wr includes mip_wr -> suppressed, no phantom.
     #=========================================================================
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs MSTATUS, s3               # cycle Y-1: enable MIE (mstatus_wr=1 -> suppress)
     csrw MIP, s4                   # cycle Y:   clear pending (RACE without fix)
 

@@ -22,7 +22,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -51,6 +51,21 @@ initial
       @(probes_cpu.x31==32'h11111111);
       repeat(3) @(posedge free_clk);
 
+      begin : program_vector
+         reg [31:0] handler_addr;
+         handler_addr = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h20)];
+         if (handler_addr == 32'h0) begin
+            $display("ERROR: nmi_handler address not published %t ns", $time);
+            error = error + 1;
+         end else begin
+            $display("PASS:  nmi_vector programmed to 0x%h %t ns", handler_addr, $time);
+         end
+      end
+
+      @(probes_cpu.x31==32'h21212121);
+      $display(" mnstatus.NMIE armed -- the bus error must now be DELIVERED");
+      repeat(3) @(posedge free_clk);
+
       check_mem_value(`SPAD(32'h00), 32'h00000000);
 
 
@@ -69,11 +84,15 @@ initial
       // Exactly one trap fired
       $display("");
       $display("--- trap_count (expect 1) ---");
-      check_mem_value(`SPAD(32'h00), 32'h00000001);
+      // Exactly one RNMI, cause = bus error. mtvec is a NEGATIVE CONTROL:
+      // mcause 5/7 are RESERVED.
+      check_mem_value(`SPAD(32'h24), 32'h00000001);
+      check_mem_value(`SPAD(32'h28), 32'h80000003);
+      check_mem_value(`SPAD(32'h00), 32'h00000000);
 
       // mcause == 5 (LD access fault)
       $display("--- trap mcause (expect 5 = LD access fault) ---");
-      check_mem_value(`SPAD(32'h04), 32'h00000005);
+      check_mem_value(`SPAD(32'h04), 32'h00000000);
 
       // *** PRIMARY DISCRIMINATOR ***
       // Captured sp must equal sp_old = 0x1FFFFFDC, NOT sp_old+48 = 0x2000000C.

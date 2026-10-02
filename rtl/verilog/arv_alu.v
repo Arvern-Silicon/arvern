@@ -52,7 +52,6 @@ parameter                 ZBB_EN         = 0;  // Zbb extension enable (basic bi
 parameter                 ZBA_EN         = 0;  // Zba extension enable (address generation)
 parameter                 ZBS_EN         = 0;  // Zbs extension enable (single-bit operations)
 parameter                 ZBC_EN         = 0;  // Zbc extension enable (carry-less multiplication)
-parameter                 ZCB_EN         = 0;  // Zcb extension enable (code-size reduction)
 parameter                 ZCMP_EN        = 0;  // Zcmp extension enable (compressed compare instructions)
 parameter                 MUL_1C_EN      = 0;  // Single-cycle multiplier
 parameter                 MUL_4C_EN      = 0;  // Four-cycle multiplier
@@ -170,7 +169,7 @@ assign ex_alu_select   = ex_uop_alu_select_i  | ex_dec_alu_select_i;
 // ALU operating modes
 assign std_mode_en     = ex_alu_mode[0];                           // Standard mode
 assign muldiv_mode_en  = ex_alu_mode[1] & (MUL_EN[0] | DIV_EN[0]); // Multiplication/Division mode
-assign zbb_mode_en     = ex_alu_mode[2] & (ZBB_EN[0] | ZCB_EN[0]); // Zbb mode (including ZCB for C.SEXT.B, C.SEXT.H, C.ZEXT.H)
+assign zbb_mode_en     = ex_alu_mode[2] & ZBB_EN[0];               // Zbb mode (C.SEXT.B/C.SEXT.H/C.ZEXT.H included: they require Zbb)
 assign zba_zbs_mode_en = ex_alu_mode[3] & (ZBA_EN[0] | ZBS_EN[0]); // Zba + Zbs modes
 assign zbc_mode_en     = ex_alu_mode[4] & (ZBC_EN[0]);             // Zbc mode (carry-less multiplication)
 
@@ -284,7 +283,11 @@ assign result_maxu     = result_sltu[0] ? std_operand2 : std_operand1;
 //-----------------------------------------------------------
 // 3. ROTATE OPERATIONS (ROL, ROR)
 //-----------------------------------------------------------
-// Reuse reuse SLL/SRL results
+// Reuse SLL/SRL results
+//
+// shift_amount==0 correctness: the unsized literal 32 makes the subtraction 32-bit wide, so
+// `32 - 0 = 32` shifts by >= the operand width, which Verilog defines as 0 -- `result_sll | 0`
+// (resp. `result_srl | 0`) is then the identity. The unsized 32 is load-bearing for this width.
 
 assign result_rol      = result_sll | (std_operand1 >> (32 - shift_amount));
 assign result_ror      = result_srl | (std_operand1 << (32 - shift_amount));
@@ -335,7 +338,7 @@ function automatic [5:0] count_population;
   input [31:0] value;
   integer i;
   begin
-    count_population = 0;
+    count_population = 6'd0;
     for (i = 0; i < 32; i = i + 1) begin
       if (value[i]) count_population = count_population + 6'd1;
     end
@@ -376,9 +379,9 @@ assign result_zbb      = ({32{ex_alu_control[0]  & zbb_mode_en &  ZBB_EN[0]     
                          ({32{ex_alu_control[11] & zbb_mode_en &  ZBB_EN[0]             }} & result_cpop  ) |  // CPOP
                          ({32{ex_alu_control[12] & zbb_mode_en &  ZBB_EN[0]             }} & result_rev8  ) |  // REV8
                          ({32{ex_alu_control[13] & zbb_mode_en &  ZBB_EN[0]             }} & result_orc_b ) |  // ORC.B
-                         ({32{ex_alu_control[14] & zbb_mode_en & (ZBB_EN[0] | ZCB_EN[0])}} & result_zext_h) |  // ZEXT.H
-                         ({32{ex_alu_control[15] & zbb_mode_en & (ZBB_EN[0] | ZCB_EN[0])}} & result_sext_h) |  // SEXT.H
-                         ({32{ex_alu_control[16] & zbb_mode_en & (ZBB_EN[0] | ZCB_EN[0])}} & result_sext_b) ;  // SEXT.B
+                         ({32{ex_alu_control[14] & zbb_mode_en &  ZBB_EN[0]             }} & result_zext_h) |  // ZEXT.H
+                         ({32{ex_alu_control[15] & zbb_mode_en &  ZBB_EN[0]             }} & result_sext_h) |  // SEXT.H
+                         ({32{ex_alu_control[16] & zbb_mode_en &  ZBB_EN[0]             }} & result_sext_b) ;  // SEXT.B
 
 
 //////======================================================================================================================//////
@@ -490,42 +493,9 @@ assign result_zbc      = ({32{ex_alu_control[1] & zbc_mode_en & ZBC_EN[0]}} & re
 
 
 //////======================================================================================================================//////
-//////======================================================================================================================//////
-//////                                                                                                                      //////
-//////                                    32x32 MULTIPLIER:                                                                 //////
-//////                                                      + 32x32 implementations,  1 cycle                               //////
-//////                                                      + 16x16 implementations,  4 cycles                              //////
-//////                                                      +  8x8  implementations, 16 cycles                              //////
-//////                                                                                                                      //////
-//////======================================================================================================================//////
-//////======================================================================================================================//////
-//////                                                                                                                      //////
-////// - ex_alu_control[0] --> MUL   : low  32 bits of OP1_signed   * OP2_signed                                            //////
-////// - ex_alu_control[1] --> MULH  : high 32 bits of OP1_signed   * OP2_signed                                            //////
-////// - ex_alu_control[2] --> MULHSU: high 32 bits of OP1_signed   * OP2_unsigned                                          //////
-////// - ex_alu_control[3] --> MULHU : high 32 bits of OP1_unsigned * OP2_unsigned                                          //////
-//////                                                                                                                      //////
-////// - ex_alu_control[4] --> DIV   : performs signed integer division of rs1 by rs2, rounding towards zero                //////
-////// - ex_alu_control[5] --> DIVU  : performs unsigned integer division of rs1 by rs2, rounding towards zero              //////
-////// - ex_alu_control[6] --> REM   : provides the remainder of the DIV division operation                                 //////
-////// - ex_alu_control[7] --> REMU  : provides the remainder of the DIVU division operation                                //////
-//////                                                                                                                      //////
-//////======================================================================================================================//////
-//////                                                                                                                      //////
-//////     Multiplier type (valid only with M-extension or Zmmul)                                                           //////
-//////                                                                                                                      //////
-//////                       MUL_1C_EN  = Single-cycle hardware multiplier                                                  //////
-//////                       MUL_4C_EN  = Four-cycle hardware multiplier                                                    //////
-//////                       MUL_16C_EN = Sixteen-cycle hardware multiplier                                                 //////
-//////                                                                                                                      //////
-//////----------------------------------------------------------------------------------------------------------------------//////
-//////                                                                                                                      //////
-//////     Divider type (valid only with M-extension)                                                                       //////
-//////                                                                                                                      //////
-//////                       DIV_12C_EN = Radix-8 divider (12 cycles)                                                       //////
-//////                       DIV_17C_EN = Radix-4 divider (17 cycles)                                                       //////
-//////                       DIV_33C_EN = Radix-2 divider (33 cycles)                                                       //////
-//////                                                                                                                      //////
+//////    32x32 MULTIPLIER / DIVIDER  (arv_alu_muldiv)                                                                      //////
+//////    Latencies: MUL 1/4/16-cyc (MUL_1C/4C/16C), DIV 12/17/33-cyc radix-8/4/2 (DIV_12C/17C/33C).                        //////
+//////    ex_alu_control[0:3] = MUL/MULH/MULHSU/MULHU, [4:7] = DIV/DIVU/REM/REMU.  Details in arv_alu_muldiv.v.             //////
 //////======================================================================================================================//////
 generate
     if (MUL_EN) begin : WITH_MULDIV
@@ -578,9 +548,8 @@ endgenerate
 //////======================================================================================================================//////
 //////======================================================================================================================//////
 
-// For the future (MUL or DIV instructions might need to stall)
-// Mode 00=BASIC, 10=SEXT, 11=Zbb: single-cycle, ready immediately
-// Mode 01=MUL/DIV: multi-cycle, wait for muldiv_done
+// ex_alu_mode is 5-bit one-hot: [0]=std [1]=muldiv [2]=zbb [3]=zba/zbs [4]=zbc.
+// Only muldiv is multi-cycle (wait for muldiv_done); every other mode is ready immediately.
 assign   ex_alu_ready_int        =  (muldiv_mode_en & muldiv_done) |  // MUL/DIV can have wait state
                                     ~muldiv_mode_en                ;  // No wait state for all other operations
 
@@ -639,6 +608,74 @@ assign   ex_alu_reg_dest_wdata_o = result;
 `endif
 // synthesis translate_on
 
+
+//////======================================================================================================================//////
+//////======================================================================================================================//////
+//////                                                                                                                      //////
+//////                                                  LINT CLEANUP                                                        //////
+//////                                                                                                                      //////
+//////======================================================================================================================//////
+//////======================================================================================================================//////
+
+generate
+    if (ZBB_EN[0] == 1'b0) begin : gen_zbb_results_unused
+        wire [31:0] result_andn_unused    = result_andn;
+        wire [31:0] result_orn_unused     = result_orn;
+        wire [31:0] result_xnor_unused    = result_xnor;
+        wire [31:0] result_min_unused     = result_min;
+        wire [31:0] result_max_unused     = result_max;
+        wire [31:0] result_minu_unused    = result_minu;
+        wire [31:0] result_maxu_unused    = result_maxu;
+        wire [31:0] result_rol_unused     = result_rol;
+        wire [31:0] result_ror_unused     = result_ror;
+        wire [31:0] result_clz_unused     = result_clz;
+        wire [31:0] result_ctz_unused     = result_ctz;
+        wire [31:0] result_cpop_unused    = result_cpop;
+        wire [31:0] result_rev8_unused    = result_rev8;
+        wire [31:0] result_orc_b_unused   = result_orc_b;
+    end
+
+    if (ZBB_EN[0] == 1'b0) begin : gen_zbb_ext_results_unused
+        wire [31:0] result_sext_b_unused  = result_sext_b;
+        wire [31:0] result_sext_h_unused  = result_sext_h;
+        wire [31:0] result_zext_h_unused  = result_zext_h;
+    end
+
+    if (ZBA_EN[0] == 1'b0) begin : gen_zba_results_unused
+        wire [31:0] result_sh1add_unused  = result_sh1add;
+        wire [31:0] result_sh2add_unused  = result_sh2add;
+        wire [31:0] result_sh3add_unused  = result_sh3add;
+    end
+
+    if (ZBS_EN[0] == 1'b0) begin : gen_zbs_results_unused
+        wire [31:0] result_bset_unused    = result_bset;
+        wire [31:0] result_bclr_unused    = result_bclr;
+        wire [31:0] result_binv_unused    = result_binv;
+        wire [31:0] result_bext_unused    = result_bext;
+    end
+
+    if (ZBC_EN[0] == 1'b0) begin : gen_zbc_results_unused
+        wire [31:0] result_clmul_unused   = result_clmul;
+        wire [31:0] result_clmulh_unused  = result_clmulh;
+        wire [31:0] result_clmulr_unused  = result_clmulr;
+    end
+
+    if (ZCMP_EN[0] == 1'b0) begin : gen_zcmp_result_unused
+        wire [31:0] result_mv_unused      = result_mv;
+    end
+
+    // ex_alu_control upper bits: [8] is shared by Zbb ROR and Zcmp CM.MV,
+    // [13:9] are Zbb-only, [16:14] are reachable from Zbb or Zcb.
+    if (ZBB_EN[0] == 1'b0 && ZCMP_EN[0] == 1'b0) begin : gen_alu_ctl8_unused
+        wire        ex_alu_control_8_unused     = ex_alu_control[8];
+    end
+    if (ZBB_EN[0] == 1'b0) begin : gen_alu_ctl13_9_unused
+        wire  [4:0] ex_alu_control_13_9_unused  = ex_alu_control[13:9];
+    end
+    if (ZBB_EN[0] == 1'b0) begin : gen_alu_ctl16_14_unused
+        wire  [2:0] ex_alu_control_16_14_unused = ex_alu_control[16:14];
+    end
+endgenerate
 
 endmodule // arv_alu
 

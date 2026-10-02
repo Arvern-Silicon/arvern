@@ -24,8 +24,9 @@ module  tb_arvern;
 parameter            ROM_SIZE     = 64*1024;                // Size of the ROM memory instance (in Bytes)
 parameter            SRAM_X_SIZE  = 64*1024;                // Size of the Executable SRAM memory instance (in Bytes)
 parameter            SRAM_NX_SIZE = 64*1024;                // Size of the Non-executable SRAM memory instance (in Bytes)
+parameter            RESET_VECTOR = 32'h20000000;           // Reset PC. Overridable at elaboration (-P/-G) so the arch-test flow can boot from SRAM_X
 
-// Clock / Reset (hresetn and resetn_lf are declared next to their reset-gen blocks below)
+// Clock / Reset
 wire                 free_clk;
 wire                 dut_hclk;
 wire                 dut_hclk_en;
@@ -33,6 +34,11 @@ wire                 system_hclk;
 wire                 system_hclk_en;
 wire                 ccsr_hclk;
 wire                 ccsr_hclk_en;
+reg                  porn_async;
+wire                 resetn_lf;
+wire                 porn;
+wire                 hresetn;
+wire                 dbgresetn;
 
 // AHB Manager interfaces
 wire          [31:0] inst_haddr;
@@ -54,6 +60,7 @@ wire                 data_hmastlock;
 wire           [3:0] data_hprot;
 wire           [2:0] data_hsize;
 wire                 data_hsmode;
+wire                 data_hmaster;       // debug-master sideband (1 = SBA access)
 wire           [1:0] data_htrans;
 wire          [31:0] data_hwdata;
 wire                 data_hwrite;
@@ -192,6 +199,9 @@ wire                 aclint_mtimer_wake_lf;
 wire                 aclint_time_gnt;
 wire          [63:0] aclint_time_val;
 
+// mhartid driver
+reg            [7:0] hartid;
+
 // Main oscillator deep-sleep allow signal.
 // When 0 (default), the main osc is forced on regardless of hclk_en.
 // When 1, the main osc enable follows the OR of all dut/system/ccsr hclk_en advisories
@@ -220,14 +230,175 @@ always @* begin
 end
 
 reg                  nmi;
-reg           [31:0] nmi_vector;
+reg            [7:0] hpm_platform_events;   // Zihpm platform event inputs (0x0B-0x12)
+
+// EXTERNAL DEBUG STATUS
+wire                 dbg_debug_mode;
+wire                 dbg_halted;
+wire                 dbg_stoptime;
+
+// DEBUG MODULE INTERFACE (DMI) - APB4, testbench is the master
+reg                  dmi_psel;
+reg                  dmi_penable;
+reg  [8:0]           dmi_paddr;
+reg                  dmi_pwrite;
+reg  [31:0]          dmi_pwdata;
+reg  [2:0]           dmi_pprot;
+wire                 dmi_pready;
+wire [31:0]          dmi_prdata;
+wire                 dmi_pslverr;
+wire                 dbg_ndmreset;
+reg  [31:0]          dmi_readval;      // scratch for dmi_read() task result
+reg  [31:0]          sba_rdata;        // scratch for sba_read32() task result
+reg  [2:0]           sba_sberr;        // scratch for sba_get_sberr() task result
+
+//=============================================================================
+// DMI master source select. The arvern DMI slave inputs are driven from one of:
+//   - default            : the testbench APB regs above (dmi_write/dmi_read tasks);
+//   - DTM_*_E2E defines   : the shipping arv_dtm wrapper (transport chosen at
+//                           elaboration by its DTM_TYPE parameter) is the
+//                           DMI master, and a host BFM drives it over a REAL
+//                           transport -- the end-to-end integration path. The
+//                           specific transport is picked by DTM_UART_E2E /
+//                           DTM_I2C_E2E / DTM_JTAG_E2E (each implies the umbrella
+//                           DTM_E2E, set by runsim); the matching host BFM
+//                           (debug_dtm_{uart,i2c,jtag}_tasks.v) is `included by
+//                           debug_dmi_tasks.v.
+//=============================================================================
+wire                 dmi_psel_src;
+wire                 dmi_penable_src;
+wire [8:0]           dmi_paddr_src;
+wire                 dmi_pwrite_src;
+wire [31:0]          dmi_pwdata_src;
+wire [2:0]           dmi_pprot_src;
+
+`ifdef DTM_E2E
+// The SHIPPING arv_dtm wrapper, with the transport picked at elaboration by
+// DTM_TYPE. Runs on the always-on free_clk so a pending request can ungate the
+// core clock; reset by dbgresetn (POR-only DM-domain reset). One build sets exactly
+// one of DTM_{UART,I2C,JTAG}_E2E; the unselected transports' PHY pins idle so their
+// DTMs stay quiescent. Bit/edge timing here is deliberately relaxed (this is an
+// integration SANITY pass); the standalone arv_dtm bench (100 MHz, non-integer
+// TCK/baud ratios) covers tight async sampling, glitches, and CDC corners.
+`ifdef DTM_UART_E2E
+localparam integer DTM_TYPE_E2E = 1;
+`elsif DTM_I2C_E2E
+localparam integer DTM_TYPE_E2E = 2;
+`else // DTM_JTAG_E2E
+localparam integer DTM_TYPE_E2E = 0;      // 0=JTAG, 1=UART, 2=I2C, 3=cJTAG
+`endif
+
+// UART PHY: host -> DTM idles high.
+reg                  uart_rx;
+wire                 uart_tx;
+initial uart_rx = 1'b1;
+
+// I2C PHY: open-drain wired-AND. m_*_pd = host pull-downs, *_pd_dtm = DTM
+// pull-downs; a line is low iff either side pulls it (idle released = high).
+reg                  m_scl_pd, m_sda_pd;
+wire                 scl_pd_dtm, sda_pd_dtm;
+wire                 scl = (m_scl_pd | scl_pd_dtm) ? 1'b0 : 1'b1;
+wire                 sda = (m_sda_pd | sda_pd_dtm) ? 1'b0 : 1'b1;
+initial begin m_scl_pd = 1'b0; m_sda_pd = 1'b0; end
+
+// JTAG PHY: host drives TMS/TDI, samples TDO. TCK is a free-running clock
+// asynchronous to free_clk (~3.1:1) so the TCK<->hclk CDC is genuinely crossed;
+// it idles at 0 (unused) for the non-JTAG transports. trst_n must be asserted at
+// start so the DMI master's TCK-side handshake flops reset (its reset is trst_n &
+// synced(dbgresetn)); without it the req/ack CDC wedges and every DMI op stalls
+// while pure-TCK IDCODE still works. Only the JTAG build pulses trst_n (it waits on
+// TCK edges, which the non-JTAG builds do not run).
+reg                  tms, tdi;
+reg                  tdo_sampled;
+wire                 tdo;
+initial begin tms = 1'b1; tdi = 1'b0; end
+`ifdef DTM_JTAG_E2E
+reg                  tck;
+initial tck = 1'b0;
+always #1550 tck = ~tck;               // ~3.1x the free_clk period (free half = 500)
+reg                  trst_n;
+initial begin
+    trst_n = 1'b0;                     // hold TAP + DMI-master TCK side in reset...
+    wait (dbgresetn);                  // ...through POR (dbgresetn deasserted)...
+    repeat (2) @(posedge tck);         // ...and a couple TCK edges, then release.
+    trst_n = 1'b1;
+end
+`else
+wire                 tck    = 1'b0;
+wire                 trst_n = 1'b1;
+`endif
+
+wire                 w_dmi_psel;
+wire                 w_dmi_penable;
+wire [8:0]           w_dmi_paddr;
+wire                 w_dmi_pwrite;
+wire [31:0]          w_dmi_pwdata;
+wire [2:0]           w_dmi_pprot;
+
+arv_dtm #(
+    .DTM_TYPE           ( DTM_TYPE_E2E  ),
+    .ARST_EN            ( 1'b1          ),
+    .AB_BREAK_CLKS      ( 32'd700       ), // Small break threshold to speed up simulations
+    .UART_RX_FIFO_DEPTH ( 32            )
+) u_dtm_wrapper (
+    .idcode_version_i   ( 4'h0          ), // IDCODE version strap (ECO-tieable port)
+    .clk_i              ( free_clk      ),
+    .dbgresetn_i        ( dbgresetn     ),
+    .scan_mode_i        ( 1'b0          ), // no scan infrastructure in this bench
+    .dbg_wakeup_o       (               ), // cold-attach wake: unused on this board
+    .tck_i              ( tck           ),
+    .trst_n_i           ( trst_n        ),
+    .tms_i              ( tms           ),
+    .tdi_i              ( tdi           ),
+    .tdo_o              ( tdo           ),
+    .tdo_oe_o           (               ),
+    .uart_rx_i          ( uart_rx       ),
+    .uart_tx_o          ( uart_tx       ),
+    .scl_i              ( scl           ),
+    .sda_i              ( sda           ),
+    .scl_pd_o           ( scl_pd_dtm    ),
+    .sda_pd_o           ( sda_pd_dtm    ),
+
+    // cJTAG (DTM_TYPE=3) is not exercised end-to-end on the core bench yet.
+    .tckc_i             ( 1'b0          ),
+    .tmsc_i             ( 1'b0          ),
+    .tmsc_o             (               ),
+    .tmsc_oe_o          (               ),
+
+    .dmi_psel_o         ( w_dmi_psel    ),
+    .dmi_penable_o      ( w_dmi_penable ),
+    .dmi_paddr_o        ( w_dmi_paddr   ),
+    .dmi_pwrite_o       ( w_dmi_pwrite  ),
+    .dmi_pwdata_o       ( w_dmi_pwdata  ),
+    .dmi_pprot_o        ( w_dmi_pprot   ),
+    .dmi_pready_i       ( dmi_pready    ),
+    .dmi_prdata_i       ( dmi_prdata    ),
+    .dmi_pslverr_i      ( dmi_pslverr   )
+);
+
+assign dmi_psel_src    = w_dmi_psel;
+assign dmi_penable_src = w_dmi_penable;
+assign dmi_paddr_src   = w_dmi_paddr;
+assign dmi_pwrite_src  = w_dmi_pwrite;
+assign dmi_pwdata_src  = w_dmi_pwdata;
+assign dmi_pprot_src   = w_dmi_pprot;
+`else
+assign dmi_psel_src    = dmi_psel;
+assign dmi_penable_src = dmi_penable;
+assign dmi_paddr_src   = dmi_paddr;
+assign dmi_pwrite_src  = dmi_pwrite;
+assign dmi_pwdata_src  = dmi_pwdata;
+assign dmi_pprot_src   = dmi_pprot;
+`endif
+
 wire                 time_req;
 reg                  time_gnt;
 reg           [63:0] time_val;
 reg           [63:0] mtime;
-reg           [63:0] mtime_init;     // initial mtime value at reset (set from stimulus; default 0)
-reg            [2:0] mtime_grant_ctr; // countdown to grant; 0=idle
-reg            [2:0] mtime_rnd;       // scratch register for random delay computation
+reg           [63:0] mtime_init;       // initial mtime value at reset (set from stimulus; default 0)
+reg            [2:0] mtime_grant_ctr;  // countdown to grant; 0=idle
+reg            [2:0] mtime_rnd;      // scratch register for random delay computation
+integer              mtime_rnd_i;    // 32-bit scratch: keeps the modulo width-clean
 
 // Zicntr time-port mux (selects between the legacy randomised model above
 // and the ACLINT's Zicntr port when use_aclint=1).
@@ -255,7 +426,9 @@ end
 //---------------------------------
 initial
   begin
-     // Initialize ROM
+     // Initialize ROM (zero-fill then load, in this order, in one initial block)
+     for (tb_idx=0; tb_idx < ROM_SIZE/4; tb_idx=tb_idx+1)
+       ahb_bus_system_inst.rom_inst0.mem[tb_idx] = 32'h00000000;
      $readmemh("./pmem.mem", ahb_bus_system_inst.rom_inst0.mem);
 
      // Initialize Executable SRAM
@@ -309,10 +482,26 @@ wire    free_osc_enable =  dut_hclk_en      |
                            ccsr_hclk_en     |
                           ~allow_deep_sleep ;
 
-osc #(.HALF_PERIOD(500)) u_free_osc (.enable_i (free_osc_enable),
-                                     .resetn_i (hresetn),
+// Clock SOURCE: reset by the RAW async porn_async, NOT the synchronized porn.
+// porn is synchronized to free_clk (which this oscillator generates), so using it
+// here would be circular; a clock source is not a free_clk flop and takes the raw
+// async reset. porn_async is POR-only, so the clock still survives an ndmreset.
+wire    hclk_aon_en;   // the oscillator's own enable view -> ACLINT hclk_aon_en_i
+
+// The model only toggles; arv_osc_ctrl owns the stop sequence, so hclk_aon_en
+// falls one edge before the clock does -- the same block a real SoC uses.
+wire    free_osc_run;
+
+osc #(.HALF_PERIOD(500)) u_free_osc (.en_i     (free_osc_run         ),
+                                     .clk_o    (free_clk             ));
+
+arv_osc_ctrl u_free_osc_ctrl        (.osc_clk_i(free_clk             ),
+                                     .osc_en_o (free_osc_run         ),
+                                     .resetn_i (porn_async           ),
+                                     .scan_mode_i(1'b0               ),
                                      .wake_i   (aclint_mtimer_wake_lf),
-                                     .clk_o    (free_clk));
+                                     .enable_i (free_osc_enable      ),
+                                     .clk_en_o (hclk_aon_en          ));
 
 // Gated Clock for the arvern. The LF MTIP wake from the ACLINT is OR'd in
 // so that a programmed mtimecmp expiry can un-gate hclk while the CPU is
@@ -321,7 +510,7 @@ wire    dut_hclk_en_with_wake = dut_hclk_en | aclint_mtimer_wake_lf;
 reg     dut_hclk_en_latch;
 always @(free_clk or dut_hclk_en_with_wake)
   if (~free_clk) dut_hclk_en_latch <= dut_hclk_en_with_wake;
-assign  dut_hclk  =  (free_clk & dut_hclk_en_latch);
+assign  dut_hclk     =  (free_clk & dut_hclk_en_latch);
 
 // Gated Clock for the system (fabric + peripherals)
 reg     system_hclk_en_latch;
@@ -333,54 +522,87 @@ assign  system_hclk  =  (free_clk & system_hclk_en_latch);
 reg     ccsr_hclk_en_latch;
 always @(free_clk or ccsr_hclk_en)
   if (~free_clk) ccsr_hclk_en_latch <= ccsr_hclk_en;
-assign  ccsr_hclk  =  (free_clk & ccsr_hclk_en_latch);
+assign  ccsr_hclk    =  (free_clk & ccsr_hclk_en_latch);
 
 // ACLINT always-on AHB-frequency clock: the free-running copy of the AHB clock source, never gated.
-wire    hclk_aon = free_clk;
+wire    hclk_aon     =   free_clk;
 
-// ACLINT low-frequency oscillator (MTIME tick): set to 5 MHz instead of
-// the typical 32 kHz to speed up simulations. PHASE_OFFSET=7 makes it
-// demonstrably asynchronous to free_clk so CDC paths in the ACLINT are
-// actually exercised.
+// ACLINT low-frequency clock (MTIME tick).
+//
+// With the real ahb_aclint: 100 kHz against the 1 MHz free_clk -- a ratio of 10,
+// rather than the typical 32 kHz, to keep simulations short. PHASE_OFFSET=7 keeps
+// it demonstrably asynchronous to free_clk so the IP's CDC paths are genuinely
+// exercised.
+//
+// THE RATIO IS A HARD CONSTRAINT, NOT A CONVENIENCE. ahb_aclint observes clk_lf
+// by sampling it AS DATA in the hclk_aon domain, so each of its phases must
+// survive two hclk_aon edges: R = f(hclk_aon)/f(clk_lf) >= 10. This oscillator
+// used to run at HALF_PERIOD(100), i.e. 5 MHz -- five times FASTER than hclk.
+// That was harmless while MTIME crossed on a Gray-coded bus (correct at any
+// ratio, in either direction) and is invalid now. Do not lower it below 5000
+// without also revisiting doc/ahb_aclint.md.
+//
+// With the behavioural aclint_model (sim/arch_test): tied to free_clk. That model
+// has no low-frequency domain at all -- it paces MTIME off retired instructions
+// and keeps its state on hclk_aon -- so a separate slow, skewed clock would only
+// add a clock domain that nothing in the model uses.
 wire    clk_lf;
-osc #(.HALF_PERIOD(100), .PHASE_OFFSET(7)) u_lf_osc (.enable_i (1'b1),
-                                                     .resetn_i (resetn_lf),
-                                                     .wake_i   (1'b1),
-                                                     .clk_o    (clk_lf));
 
-// LF-domain reset
-reg        resetn_lf_async;
-reg  [1:0] resetn_lf_sync;
-wire       resetn_lf       = resetn_lf_sync[1];
+`ifdef ARV_TB_ACLINT_MODEL
+assign  clk_lf = free_clk;
+`else
+// Clock SOURCE: like u_free_osc, reset by the raw async porn_async (resetn_lf is
+// synchronized to clk_lf, which this oscillator generates -- circular).
+// Free-running: this one is never stopped, so it needs no controller.
+osc #(.HALF_PERIOD(5000), .PHASE_OFFSET(7)) u_lf_osc (.en_i  (1'b1  ),
+                                                      .clk_o (clk_lf));
+`endif
+
+// Reset generation. A single async power-on pulse (porn_async) drives reset_gen,
+// which produces four synchronized resets modelling the SoC halt-on-reset contract:
+//   porn_async: the RAW async POR (this reg) -> the clock SOURCES (u_free_osc,
+//               u_lf_osc) directly, since they generate the clocks the synchronized
+//               resets are built on. POR-only, so the clocks survive an ndmreset.
+//   porn      : POR-only, synchronized to free_clk -> always-on FLOPS in that domain
+//               (the mtime real-time counter). Survives an ndmreset.
+//   hresetn   : hart/system reset = POR | ndmreset -> the DUT's hresetn_i and the rest
+//               of the system (AHB interconnect/memory/peripherals, checkers,
+//               custom-CSR). The debugger's dmcontrol.ndmreset (dbg_ndmreset) resets
+//               the hart and the system while the clock and DM keep running; SRAM/ROM
+//               array contents survive on their own.
+//   dbgresetn : POR-only DM reset -> the DUT's dbgresetn_i, so the DM (and
+//               resethaltreq) survive an ndmreset and the debugger stays connected.
+// For every non-reset-halt test dbg_ndmreset=0, so hresetn == porn (transparent).
+
 initial
   begin
-     resetn_lf_async = 1'b1;
-     #117;
-     resetn_lf_async = 1'b0;
-     #617;
-     resetn_lf_async = 1'b1;
+     porn_async = 1'b1;
+     #90;
+     porn_async = 1'b0;           // assert power-on reset
+     #650;
+     porn_async = 1'b1;           // release
   end
-always @(negedge clk_lf or negedge resetn_lf_async)
-  if (!resetn_lf_async) resetn_lf_sync <= 2'b00;
-  else                  resetn_lf_sync <= {resetn_lf_sync[0], 1'b1};
 
+reset_gen u_reset_gen (
+    .porn_async_i ( porn_async    ),
+    .clk_lf       ( clk_lf        ),
+    .free_clk     ( free_clk      ),
+    .dbg_ndmreset ( dbg_ndmreset  ),
+    .resetn_lf    ( resetn_lf     ),
+    .porn         ( porn          ),
+    .hresetn      ( hresetn       ),
+    .dbgresetn    ( dbgresetn     )
+);
 
-// Main AHB-domain reset. Same shape as the LF one: async raw pulse, then a
-// 2-FF synchronizer clocked on the falling edge of free_clk releases it.
-reg        hresetn_async;
-reg  [1:0] hresetn_sync;
-wire       hresetn       = hresetn_sync[1];
-initial
-  begin
-     hresetn_async = 1'b1;
-     #93;
-     hresetn_async = 1'b0;
-     #593;
-     hresetn_async = 1'b1;
-  end
-always @(negedge free_clk or negedge hresetn_async)
-  if (!hresetn_async) hresetn_sync <= 2'b00;
-  else                hresetn_sync <= {hresetn_sync[0], 1'b1};
+`ifdef ARV_COV_RESET_ZERO
+// Coverage counts start once reset is applied: the Verilator coverage flow starts every
+// flop at 1 so the asynchronous resets see an edge, and the reset driving them to 0 would
+// otherwise count as a toggle of every bit.
+initial begin
+    @(posedge hresetn);
+    $c("Verilated::threadContextp()->coveragep()->zero();");
+end
+`endif
 
 // Variables initialization
 initial
@@ -400,11 +622,18 @@ initial
     irq_platform           =  16'h0000;
     random_irq_enable      =  0;
     use_plic               =  0;
+    hartid                 =  8'h23;
     use_aclint             =  0;
     allow_deep_sleep       =  0;
     plic_irq_src           = {(PLIC_NUM_SRC+1){1'b0}};
     nmi                    =  0;
-    nmi_vector             =  32'h00000000;
+    hpm_platform_events    =  8'h00;
+    dmi_psel               =  0;
+    dmi_penable            =  0;
+    dmi_paddr              =  0;
+    dmi_pwrite             =  0;
+    dmi_pwdata             =  0;
+    dmi_pprot              =  0;
     time_gnt               =  1'b0;
     time_val               =  64'h0;
     mtime                  =  64'h0;
@@ -472,9 +701,9 @@ initial
 //--------------------------------------------------------------------
 // ZICNTR: mtime free-running counter
 //--------------------------------------------------------------------
-always @(posedge free_clk or negedge hresetn)
-  if (!hresetn) mtime <= mtime_init;
-  else          mtime <= mtime + 1'b1;
+always @(posedge free_clk or negedge porn)
+  if (!porn) mtime <= mtime_init;
+  else       mtime <= mtime + 1'b1;
 
 //--------------------------------------------------------------------
 // ZICNTR: randomized mtime grant model (delay 0-5 clock cycles)
@@ -482,8 +711,8 @@ always @(posedge free_clk or negedge hresetn)
 // Delay=1-5: grant after N additional clock cycles.
 // A new random delay is chosen for each new request.
 //--------------------------------------------------------------------
-always @(posedge free_clk or negedge hresetn)
-  if (!hresetn) begin
+always @(posedge free_clk or negedge porn)
+  if (!porn) begin
     time_gnt        <= 1'b0;
     time_val        <= 64'h0;
     mtime_grant_ctr <= 3'd0;
@@ -492,7 +721,8 @@ always @(posedge free_clk or negedge hresetn)
 
     if (mtime_grant_ctr == 3'd0) begin
       if (time_req) begin
-        mtime_rnd = ($random >> 1) % 6;   // blocking: 0-5
+        mtime_rnd_i = ($random >> 1) % 6;   // integer scratch: keeps the modulo 32-bit
+        mtime_rnd = mtime_rnd_i[2:0];   // blocking: 0-5
         if (mtime_rnd == 3'd0) begin
           // Delay 0: grant in the same cycle as the request
           time_gnt <= 1'b1;
@@ -517,24 +747,26 @@ always @(posedge free_clk or negedge hresetn)
 //--------------------------------------------------------------------
 // DUT: ARVERN
 //--------------------------------------------------------------------
-arvern #(.RV32E_EN            ( RV32E_EN            ),
-           .B_EXTENSION         ( B_EXTENSION         ),
-           .C_EXTENSION         ( C_EXTENSION         ),
-           .M_EXTENSION         ( M_EXTENSION         ),
-           .MUL_TYPE            ( MUL_TYPE            ),
-           .DIV_TYPE            ( DIV_TYPE            ),
-           .CCSR_EN             ( CCSR_EN             ),
-           .NMI_EN              ( NMI_EN              ),
-           .SU_MODE_EN          ( SU_MODE_EN          ),
-           .ZICNTR_EN           ( ZICNTR_EN           ),
-           .ZIHPM_NR            ( ZIHPM_NR            ),
-           .ASYNC_RST_EN        ( ASYNC_RST_EN        ),
-           .SINGLE_CYCLE_BRANCH ( SINGLE_CYCLE_BRANCH ),
-           .MVENDORID           ( MVENDORID           )) dut (
+arvern #(.RV32E_EN             ( RV32E_EN                  ),
+         .B_EXTENSION          ( B_EXTENSION               ),
+         .C_EXTENSION          ( C_EXTENSION               ),
+         .M_EXTENSION          ( M_EXTENSION               ),
+         .MUL_TYPE             ( MUL_TYPE                  ),
+         .DIV_TYPE             ( DIV_TYPE                  ),
+         .CCSR_EN              ( CCSR_EN                   ),
+         .SU_MODE_EN           ( SU_MODE_EN                ),
+         .DEBUG_EN             ( DEBUG_EN                  ),
+         .DM_TRIGGER_NR        ( DM_TRIGGER_NR             ),
+         .ZICNTR_EN            ( ZICNTR_EN                 ),
+         .ZIHPM_NR             ( ZIHPM_NR                  ),
+         .PMP_NR               ( PMP_NR                    ),
+         .ASYNC_RST_EN         ( ASYNC_RST_EN              ),
+         .SINGLE_CYCLE_BRANCH  ( SINGLE_CYCLE_BRANCH       )) dut (
 
 // AHB CLOCK & RESET
     .hclk_i                    ( dut_hclk                  ),
-    .hresetn_i                 ( hresetn                   ),
+    .hresetn_i                 ( hresetn                   ),   // hart reset (POR OR debugger ndmreset), from reset_gen
+    .dbgresetn_i               ( dbgresetn                 ),   // debug-module reset (POR only; survives ndmreset)
     .hclk_en_o                 ( dut_hclk_en               ),
 
 // INSTRUCTION AHB BUS
@@ -563,6 +795,7 @@ arvern #(.RV32E_EN            ( RV32E_EN            ),
     .data_hprot_o              ( data_hprot                ),
     .data_hsize_o              ( data_hsize                ),
     .data_hsmode_o             ( data_hsmode               ),
+    .data_hmaster_o            ( data_hmaster              ),
     .data_htrans_o             ( data_htrans               ),
     .data_hwdata_o             ( data_hwdata               ),
     .data_hwrite_o             ( data_hwrite               ),
@@ -583,20 +816,36 @@ arvern #(.RV32E_EN            ( RV32E_EN            ),
     .irq_platform_i            ( irq_platform_to_dut       ),
 
 // OTHERS
-    .hartid_i                  ( 8'h23                     ),
-    .reset_vector_i            ( 32'h20000000              ),
+    .hartid_i                  ( hartid                    ),
+    .reset_vector_i            ( RESET_VECTOR              ),
 
 // LOCKUP STATUS
     .lockup_o                  ( lockup                    ),
 
 // NMI (SMRNMI)
     .nmi_i                     ( nmi                       ),
-    .nmi_vector_i              ( nmi_vector                ),
+// ZIHPM PLATFORM EVENTS
+    .hpm_platform_events_i     ( hpm_platform_events       ),
 
 // ZICNTR TIME INTERFACE
     .time_req_o                ( time_req                  ),
     .time_gnt_i                ( time_gnt_to_dut           ),
-    .time_val_i                ( time_val_to_dut           )
+    .time_val_i                ( time_val_to_dut           ),
+
+// EXTERNAL DEBUG (Sdext)
+    .dbg_debug_mode_o          ( dbg_debug_mode            ),
+    .dbg_halted_o              ( dbg_halted                ),
+    .dbg_stoptime_o            ( dbg_stoptime              ),
+    .dbg_ndmreset_o            ( dbg_ndmreset              ),
+    .dmi_psel_i                ( dmi_psel_src              ),
+    .dmi_penable_i             ( dmi_penable_src           ),
+    .dmi_paddr_i               ( dmi_paddr_src             ),
+    .dmi_pwrite_i              ( dmi_pwrite_src            ),
+    .dmi_pwdata_i              ( dmi_pwdata_src            ),
+    .dmi_pprot_i               ( dmi_pprot_src             ),
+    .dmi_pready_o              ( dmi_pready                ),
+    .dmi_prdata_o              ( dmi_prdata                ),
+    .dmi_pslverr_o             ( dmi_pslverr               )
 
 );
 
@@ -636,11 +885,11 @@ arv_custom_csr #(.NR_USR_RW(2), .NR_USR_RO(1),
 // BUS SYSTEM
 //--------------------------------------------------------------------
 
-ahb_bus_system #(.ROM_SIZE         (ROM_SIZE         ),
-                 .SRAM_X_SIZE      (SRAM_X_SIZE      ),
-                 .SRAM_NX_SIZE     (SRAM_NX_SIZE     ),
-                 .PLIC_NUM_SRC     (PLIC_NUM_SRC    ),
-                 .PLIC_SU_MODE_EN  (SU_MODE_EN       )) ahb_bus_system_inst (
+ahb_bus_system #(.ROM_SIZE        (ROM_SIZE                ),
+                 .SRAM_X_SIZE     (SRAM_X_SIZE             ),
+                 .SRAM_NX_SIZE    (SRAM_NX_SIZE            ),
+                 .PLIC_NUM_SRC    (PLIC_NUM_SRC            ),
+                 .PLIC_SU_MODE_EN (SU_MODE_EN              )) ahb_bus_system_inst (
 
 // AHB CLOCK & RESET
     .hclk_i                    ( system_hclk               ),
@@ -680,6 +929,7 @@ ahb_bus_system #(.ROM_SIZE         (ROM_SIZE         ),
 // NON-EXECUTABLE AHB MANAGER INTERFACE
     .m_nx_haddr_i              ( data_haddr                ),
     .m_nx_hburst_i             ( data_hburst               ),
+    .m_nx_hmaster_i            ( data_hmaster              ),
     .m_nx_hmastlock_i          ( data_hmastlock            ),
     .m_nx_hprot_i              ( data_hprot                ),
     .m_nx_hsize_i              ( data_hsize                ),
@@ -756,6 +1006,7 @@ ahb_bus_system #(.ROM_SIZE         (ROM_SIZE         ),
 
 // AHB ACLINT
     .hclk_aon_i                ( hclk_aon                  ),
+    .hclk_aon_en_i             ( hclk_aon_en               ),
     .clk_lf_i                  ( clk_lf                    ),
     .resetn_lf_i               ( resetn_lf                 ),
     .aclint_irq_m_software_o   ( aclint_irq_m_software     ),
@@ -772,6 +1023,7 @@ ahb_bus_system #(.ROM_SIZE         (ROM_SIZE         ),
 //--------------------------------------------------------------------
 
 probes_instructions probes_instructions ();
+probes_debug #(.DEBUG_EN(DEBUG_EN)) probes_debug ();
 probes_cpu          probes_cpu();
 probes_cpu_alt      probes_cpu_alt();
 probes_rom          probes_rom();
@@ -798,24 +1050,24 @@ monitor_exception   monitor_excp_ebreak                   ({"EBREAK",           
 monitor_exception   monitor_excp_ecall                    ({"ECALL",                           472'b0}, dut.arv_csr_top_inst.id_excp_ecall_i,                    free_clk, error_on_exception);
 monitor_exception   monitor_excp_load_address_misaligned  ({"Data Load  Missaligned Address",  272'b0}, dut.arv_csr_top_inst.ex_excp_load_address_misaligned_i,  free_clk, error_on_exception);
 monitor_exception   monitor_excp_store_address_misaligned ({"Data Store Missaligned Address",  272'b0}, dut.arv_csr_top_inst.ex_excp_store_address_misaligned_i, free_clk, error_on_exception);
-monitor_exception   monitor_excp_load_access_fault        ({"Data Load  Access Fault",         328'b0}, dut.arv_csr_top_inst.wb_excp_load_access_fault_i,        free_clk, error_on_exception);
-monitor_exception   monitor_excp_store_access_fault       ({"Data Store Access Fault",         328'b0}, dut.arv_csr_top_inst.wb_excp_store_access_fault_i,       free_clk, error_on_exception);
+monitor_exception   monitor_excp_load_access_fault        ({"Data Load  Bus Error   ",         328'b0}, dut.arv_csr_top_inst.wb_bus_error_load_i,                free_clk, error_on_exception);
+monitor_exception   monitor_excp_store_access_fault       ({"Data Store Bus Error   ",         328'b0}, dut.arv_csr_top_inst.wb_bus_error_store_i,               free_clk, error_on_exception);
 
 //
 // Instruction/PC Consistency Checker
 //----------------------------------------
 
 instruction_pc_checker #(
-    .ROM_SIZE_BYTES         (ROM_SIZE)
+    .ROM_SIZE_BYTES           (ROM_SIZE)
 ) instruction_pc_checker_inst (
-    .hclk_i                 (free_clk),
-    .hresetn_i              (hresetn),
-    .id_instruction_i       (dut.arv_decode_inst.id_instruction_i),
+    .hclk_i                   (free_clk),
+    .hresetn_i                (hresetn),
+    .id_instruction_i         (dut.arv_decode_inst.id_instruction_i),
     .id_instruction_valid_i   (dut.arv_decode_inst.id_instruction_valid_i),
     .id_instruction_request_i (dut.arv_decode_inst.id_instruction_request_o),
     .id_pc_i                  (dut.arv_decode_inst.id_pc_i),
-    .report_trigger_i       (checker_report_en),
-    .checker_enable_i       (checker_enable)
+    .report_trigger_i         (checker_report_en),
+    .checker_enable_i         (checker_enable)
 );
 
 //
@@ -827,12 +1079,10 @@ wire ahb_chk_en = checker_enable;
 wire ahb_chk_en = 1'b0;
 `endif
 
-// Instruction bus: HADDR/HTRANS mid-wait changes are an acknowledged gray-area
-// behaviour intrinsic to the single-cycle-branch's combinational
-//    inst_hrdata -> inst_haddr loop -> exempted here.
-// (see doc/spec_compliance_notes.md, §"Acknowledged Spec Gray Areas")
-//    + HSIZE/HWRITE/HBURST mid-wait changes remain fully enforced (genuine bugs if seen).
-ahb_protocol_checker #(.ALLOW_HADDR_HTRANS_CHANGE_IN_WAIT(1'b1)) ahb_protocol_checker_inst (
+// Instruction bus: fully checked, no exemptions. inst_htrans_o is gated with
+// inst_hready_i, so the master only presents NONSEQ on cycles the transfer is accepted
+// and no mid-wait address-phase change can be observed.
+ahb_protocol_checker ahb_protocol_checker_inst (
     .bus_name_i             ({"AHB Instruction Bus", 360'b0}),
     .hclk_i                 (dut_hclk),
     .hresetn_i              (hresetn),
@@ -906,16 +1156,75 @@ initial // Timeout
        $display(" ===============================================");
        $display("");
        tb_extra_report;
+       tb_result_file("FAILED");
        $finish;
    `endif
   end
 
 `include "tb_irq_checkers.v"
 
+// Subordinate-side HREADY protocol violations, counted inside the wait-state
+// models (see ahb_waitstate_inserter.v: a stalling subordinate must be handed
+// hready=0). Folded into `error` at the end of the test.
+integer hready_viol_total;
+task collect_hready_violations;
+  begin
+     hready_viol_total = 0;
+`ifndef FUSED_AHB
+     hready_viol_total = hready_viol_total + ahb_bus_system_inst.ahb_waitstate_inserter_rom_inst.hready_viol_cnt
+                                          + ahb_bus_system_inst.ahb_waitstate_inserter_sram_x_inst.hready_viol_cnt
+                                          + ahb_bus_system_inst.ahb_waitstate_inserter_sram_lo_x_inst.hready_viol_cnt;
+`endif
+     hready_viol_total = hready_viol_total + ahb_bus_system_inst.ahb_waitstate_inserter_sram_nx_inst.hready_viol_cnt
+                                          + ahb_bus_system_inst.ahb_waitstate_inserter_periph0_inst.hready_viol_cnt
+                                          + ahb_bus_system_inst.ahb_waitstate_inserter_periph1_inst.hready_viol_cnt
+                                          + ahb_bus_system_inst.ahb_waitstate_inserter_periph2_inst.hready_viol_cnt;
+     if (hready_viol_total != 0)
+       begin
+          $display("ERROR: %0d cycle(s) where a stalling subordinate was handed hready=1", hready_viol_total);
+          error = error + hready_viol_total;
+       end
+  end
+endtask
+
+// Subordinate-side HMASTER: the fabric numbers the instruction port 4'h0 and
+// the data port 4'h1, and ORs data_hmaster_o into HMASTER[3], so an SBA
+// transfer arrives as 4'h9. Any other value is an error; SBA arrivals are
+// counted for the debug tests (not visible behind the fused ROM/SRAM).
+integer sba_hmaster_cnt;
+initial sba_hmaster_cnt = 0;
+
+task check_sub_hmaster;
+  input       commit;
+  input [3:0] hmaster;
+  begin
+     if (commit) begin
+        if ((hmaster != 4'h0) && (hmaster != 4'h1) && (hmaster != 4'h9)) begin
+           $display("ERROR: subordinate HMASTER=%h (expected 0, 1 or 9) %t ns", hmaster, $time);
+           error = error + 1;
+        end
+        if (hmaster == 4'h9) sba_hmaster_cnt = sba_hmaster_cnt + 1;
+     end
+  end
+endtask
+
+always @(posedge free_clk) begin
+`ifndef FUSED_AHB
+   check_sub_hmaster(ahb_bus_system_inst.s_rom_hsel       & ahb_bus_system_inst.s_rom_hready       & ahb_bus_system_inst.s_rom_htrans[1],       ahb_bus_system_inst.s_rom_hmaster);
+   check_sub_hmaster(ahb_bus_system_inst.s_sram_x_hsel    & ahb_bus_system_inst.s_sram_x_hready    & ahb_bus_system_inst.s_sram_x_htrans[1],    ahb_bus_system_inst.s_sram_x_hmaster);
+   check_sub_hmaster(ahb_bus_system_inst.s_sram_lo_x_hsel & ahb_bus_system_inst.s_sram_lo_x_hready & ahb_bus_system_inst.s_sram_lo_x_htrans[1], ahb_bus_system_inst.s_sram_lo_x_hmaster);
+`endif
+   check_sub_hmaster(ahb_bus_system_inst.s_sram_nx_hsel   & ahb_bus_system_inst.s_sram_nx_hready   & ahb_bus_system_inst.s_sram_nx_htrans[1],   ahb_bus_system_inst.s_sram_nx_hmaster);
+   check_sub_hmaster(ahb_bus_system_inst.s_periph0_hsel   & ahb_bus_system_inst.s_periph0_hready   & ahb_bus_system_inst.s_periph0_htrans[1],   ahb_bus_system_inst.s_periph0_hmaster);
+   check_sub_hmaster(ahb_bus_system_inst.s_periph1_hsel   & ahb_bus_system_inst.s_periph1_hready   & ahb_bus_system_inst.s_periph1_htrans[1],   ahb_bus_system_inst.s_periph1_hmaster);
+   check_sub_hmaster(ahb_bus_system_inst.s_periph2_hsel   & ahb_bus_system_inst.s_periph2_hready   & ahb_bus_system_inst.s_periph2_htrans[1],   ahb_bus_system_inst.s_periph2_hmaster);
+end
+
 initial // Normal end of test
   begin
      #10;
      @(posedge stimulus_done);
+     collect_hready_violations;
 
      $display(" ===============================================");
      if (error!=0)
@@ -931,6 +1240,7 @@ initial // Normal end of test
      $display(" ===============================================");
      $display("");
      tb_extra_report;
+     tb_result_file((error!=0) ? "FAILED" : "PASSED");
      $finish;
   end
 
@@ -957,6 +1267,7 @@ initial // Normal end of test
 `ifndef NOTRACE
          // Flush pending trace entries and close trace file
          probes_instructions.trace_flush_and_close;
+         probes_debug.trace_flush_and_close;
 `endif
 
          $display("");
@@ -974,8 +1285,28 @@ initial // Normal end of test
          $display(" ===============================================");
          $display("");
          tb_extra_report;
+         tb_result_file("SKIPPED");
          $finish;
       end
    endtask
+
+   // Verdict for rtlsim.sh, which turns it into the simulation's exit status
+   // ($finish exits 0 whatever the outcome).
+   task tb_result_file;
+      input [8*8-1:0] verdict;
+      integer fd;
+      begin
+         fd = $fopen("sim_result.txt", "w");
+         $fdisplay(fd, "%0s", verdict);
+         $fclose(fd);
+      end
+   endtask
+
+   //------------------------------------------------------------------------
+   // DMI bus helper tasks - dmi_xfer / dmi_write / dmi_read. Factored
+   // into a dedicated file like check_tasks.v / tb_irq_checkers.v; the DMI signals
+   // they drive are declared next to the DUT instantiation above.
+   //------------------------------------------------------------------------
+`include "debug_dmi_tasks.v"
 
 endmodule

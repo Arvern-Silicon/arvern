@@ -38,6 +38,8 @@
 #   Phase 4 : M-mode write to a read-only shadow CSR -> mcause=2.
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -252,6 +254,7 @@ pS_smode_code:
     #===================================================================
 _start:
     li   sp, 0x80010000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000        # Scratchpad base
     li   s2, 0                 # "before" trap-count snapshot register
     # DO NOT call _random_irq_init (no_random_irq test)
@@ -618,6 +621,10 @@ p3_timeh_allow_return:
     li   t0, 0x1800
     csrc mstatus, t0           # Clear MPP
     li   t0, 0x0800
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrsi 0x744, 8            # Smdbltrp: a trap in M-mode with NMIE=0 is an unexpected trap
+    csrw mstatush, x0
+
     csrs mstatus, t0           # MPP = 01 (S-mode)
     li   t0, 0x80
     csrc mstatus, t0           # Clear MPIE (keep MIE=0 after mret)

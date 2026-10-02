@@ -17,7 +17,7 @@
 #   Phase 2: csrrw  t0, mvendorid, x0   (write to RO CSR, rd!=x0)
 #   Phase 3: csrrs  t1, mvendorid, t6   (set on RO CSR with rs1!=x0)
 #   Phase 4: csrrwi t2, mvendorid, 1    (immediate write to RO CSR)
-#   Phase 5: csrrw  t3, 0x3A0, x0       (write to unimplemented CSR bank)
+#   Phase 5: csrrw  t3, 0x2C0, x0       (write to unimplemented CSR bank)
 #
 #   In each case the destination register must retain its pre-instruction
 #   value after the illegal-instruction trap is taken and skipped.
@@ -46,7 +46,7 @@
 #   0x40: t2 value AFTER trap (expect 0xBADC0DE5)
 #   0x44: MCAUSE (expect 2)
 #
-# Phase 5: csrrw rd, 0x3A0, x0
+# Phase 5: csrrw rd, 0x2C0, x0
 #   0x50: t3 value AFTER trap (expect 0xDEFACED0)
 #   0x54: MCAUSE (expect 2)
 #=========================================================================
@@ -93,6 +93,8 @@ trap_handler:
     # MAIN TEST CODE
     #=================================================================
  _start:
+    csrsi 0x744, 8            # Smdbltrp: a trap in M-mode with NMIE=0 is an unexpected trap
+    csrw mstatush, x0        # MDT resets to 1; clear it or the first trap is an Smdbltrp double trap
     li   sp, 0x80010000
     li   s1, 0x80000000
 
@@ -181,13 +183,19 @@ trap_handler:
 
 
     #=================================================================
-    # PHASE 5: csrrw rd, 0x3A0, x0       (unimplemented CSR bank)
-    #          addr[11:6]=6'b001110 is not decoded by any bank -> trap.
+    # PHASE 5: csrrw rd, 0x2C0, x0       (unimplemented CSR bank)
+    #          addr[11:6]=6'b001011 is not decoded by any bank -> trap.
+    #
+    #          This probe used to be 0x3A0. That address is pmpcfg0 and became
+    #          a REAL CSR when PMP landed, so the phase stopped trapping. 0x2C0
+    #          sits in 0x200-0x2FF, which the privileged spec allocates to
+    #          nothing -- unlike 0x3C0, which would become pmpaddr16 in a
+    #          64-entry PMP build.
     #=================================================================
 
     li   t3, 0xDEFACED0
-    # csrrw t3, 0x3A0, x0
-    csrrw t3, 0x3A0, x0
+    # csrrw t3, 0x2C0, x0
+    csrrw t3, 0x2C0, x0
 
     sw   t3, 0x50(s1)
     lw   t6, 0x04(s1)

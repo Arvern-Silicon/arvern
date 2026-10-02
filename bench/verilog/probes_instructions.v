@@ -18,7 +18,7 @@
 `endif
 
 module probes_instructions #(
-  // Clock period in nanoseconds — used for the time(ns) trace column.
+  // Clock period in nanoseconds - used for the time(ns) trace column.
   // Default matches the standard 1MHz simulation clock (#500 half-period).
   parameter CLK_PERIOD_NS = 1000
 );
@@ -548,7 +548,7 @@ module probes_instructions #(
   wire      [31:0] bin_id;
 
   // When a UOP instruction with a branch (cm.jt, cm.jalt, cm.popret, cm.popretz) is executing,
-  // the instruction visible in the ID stage will be killed by the branch — hide it.
+  // the instruction visible in the ID stage will be killed by the branch - hide it.
   wire uop_branch_active = `ARV_CPU_INST.arv_decode_inst.ex_uop_has_branch;
 
   assign pc_id    = `ARV_CPU_INST.arv_decode_inst.id_pc_i;
@@ -683,7 +683,7 @@ module probes_instructions #(
   wire         trace_mnret_taken = `ARV_CPU_INST.arv_csr_top_inst.arv_csr_traps_inst.mnret_taken;
   // irqkill: trap_kill_muldiv/uop fires combinatorially in the same cycle as trap_taken
   // (because the kill makes pipeline_drained_for_irq immediately true), so
-  // muldiv_kill_suppress/uop_kill_suppress — which are registered — are still 0 at
+  // muldiv_kill_suppress/uop_kill_suppress - which are registered - are still 0 at
   // that posedge.  OR in the combinatorial kill outputs to catch this first-cycle case.
   wire         trace_kill_muldiv = `ARV_CPU_INST.arv_csr_top_inst.arv_csr_traps_inst.muldiv_kill_suppress
                                  | `ARV_CPU_INST.trap_kill_muldiv;
@@ -731,7 +731,7 @@ module probes_instructions #(
 
   // Pending non-LS instruction buffer: emit is deferred until the execute-stage
   // register write is visible (trace_wr_en, 1 cycle after dispatch) or until
-  // the next instruction dispatches — whichever comes first.
+  // the next instruction dispatches - whichever comes first.
   // Both events can coincide in back-to-back execution; the single always block
   // handles this via NBA priority (emit fires in step 3, new buffer in step 4).
   reg          trace_nls_pending;
@@ -863,8 +863,8 @@ module probes_instructions #(
             trap_cause_str[5*8 +: 8] = "Q";
             trap_cause_str[4*8 +: 8] = ":";
             trap_cause_str[3*8 +: 8] = "P";
-            trap_cause_str[2*8 +: 8] = "0" + (cause / 10);
-            trap_cause_str[1*8 +: 8] = "0" + (cause % 10);
+            trap_cause_str[2*8 +: 8] = "0" + ({3'b000, cause} / 8'd10);
+            trap_cause_str[1*8 +: 8] = "0" + ({3'b000, cause} % 8'd10);
           end
         endcase
       end else begin
@@ -971,7 +971,7 @@ module probes_instructions #(
     if (!trace_resetn) trace_cycle <= 64'd0;
     else               trace_cycle <= trace_cycle + 64'd1;
 
-  // Main trace logic — single always block to avoid races on pending flags.
+  // Main trace logic - single always block to avoid races on pending flags.
   //
   // Priority within a clock edge:
   //   1. aph_valid  : save LS address (no conflict)

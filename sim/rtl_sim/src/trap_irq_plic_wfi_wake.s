@@ -22,6 +22,8 @@
 #     3. After wake + trap, mainline resumes; verifies trap_count == 1.
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -96,6 +98,11 @@ _start:
     la   t0, m_trap_handler
     csrw mtvec, t0
 
+    # Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+    # resets to 0, so boot code must set mnstatus.NMIE=1 before any
+    # ordinary interrupt can be delivered. Smrnmi is unconditional.
+    csrsi 0x744, 8              # mnstatus.NMIE = 1
+
     # Configure PLIC: priority[1]=5, enable src 1 in ctx 0, threshold=0
     li   t0, 5
     li   t1, PLIC_PRI1
@@ -111,6 +118,9 @@ _start:
     li   t0, 0x800
     csrs mie, t0
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     li   x31, 0x11111111

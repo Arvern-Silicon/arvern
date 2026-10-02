@@ -1,0 +1,7 @@
+name: arvern-light
+compiler_exe: riscv64-unknown-elf-gcc # provided by the act4-build container
+objdump_exe: riscv64-unknown-elf-objdump
+ref_model_exe: sail_riscv_sim
+udb_config: arvern-light.yaml
+linker_script: link.ld
+dut_include_dir: . # holds rvmodel_macros.h

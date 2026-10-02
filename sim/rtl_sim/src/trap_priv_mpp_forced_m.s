@@ -134,6 +134,9 @@ trap_handler:
     csrr t0, mstatus           # current value
     li   t1, ~0x1800           # mask out MPP bits
     and  t0, t0, t1            # MPP -> 00 in the write image
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrw mstatus, t0           # full overwrite (csrrw alias)
     csrr t0, mstatus
     sw   t0, 0x28(s1)

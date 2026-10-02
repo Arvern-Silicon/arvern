@@ -29,7 +29,7 @@ integer allow_peripheral_accesses;
 reg [31:0] taken_count;
 reg [31:0] nottaken_count;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin

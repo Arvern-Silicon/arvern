@@ -30,6 +30,8 @@
 #     - S-mode mainline reports completion via x31.
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -126,6 +128,7 @@ m_trap_handler:
     #---------------------------------------------------------------
 _start:
     li   sp, 0x80010000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000
 
     # Zero scratchpad
@@ -140,6 +143,11 @@ _start:
     csrw mtvec, t0
     la   t0, s_trap_handler
     csrw stvec, t0
+
+    # Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+    # resets to 0, so boot code must set mnstatus.NMIE=1 before any
+    # ordinary interrupt can be delivered. Smrnmi is unconditional.
+    csrsi 0x744, 8              # mnstatus.NMIE = 1
 
     # Configure PLIC ctx 1 (S-context)
     #   priority[1] = 5
@@ -178,6 +186,9 @@ _start:
     li   t0, 0x1800                 # MPP[12:11]
     csrc mstatus, t0
     li   t0, 0x0800                 # MPP = 01 (S-mode)
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
     li   t0, 0x80                   # MPIE = 1
     csrs mstatus, t0

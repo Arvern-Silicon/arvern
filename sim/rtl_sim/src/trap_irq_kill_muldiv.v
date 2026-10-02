@@ -27,7 +27,7 @@ integer ahb_master;
 integer allow_peripheral_accesses;
 
 // Scratchpad word address offset (byte address / 4)
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 //------------------------------------------------------------------------
 // IRQ LATENCY MEASUREMENT

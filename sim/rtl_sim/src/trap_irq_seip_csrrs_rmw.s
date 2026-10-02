@@ -54,6 +54,9 @@ main:
     #   mstatus.MIE = 0  (machine-mode interrupts globally off)
     #   mie         = 0  (all per-cause enables off, incl. SEIE bit 9)
     #   mideleg     = 0  (nothing delegated to S-mode)
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrw mstatus, zero
     csrw mie,     zero
     csrw mideleg, zero

@@ -24,6 +24,8 @@
 #   a0 = 1  →  return to M-mode (set MPP = 11)
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -96,6 +98,7 @@ m_handler_done:
     #=================================================================
  _start:
     li   sp, 0x80010000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000        # Scratchpad base
 
     # Install M-mode trap handler
@@ -107,7 +110,7 @@ m_handler_done:
     # Smrnmi: mnstatus.NMIE resets to 0, and while NMIE=0 the hart must
     # behave as though MPRV were clear (RISC-V Priv spec). This test
     # exercises MPRV in normal M-mode (not an RNMI handler), so NMIE must
-    # be 1 for MPRV to take effect on NMI_EN=1 builds (the default config).
+    # be 1 for MPRV to take effect (Smrnmi is unconditional).
     csrsi 0x744, 8             # set mnstatus.NMIE (bit 3)
 
 
@@ -141,6 +144,9 @@ m_handler_done:
 
     # Set MPRV = 1
     li   t0, 0x20000
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Snapshot MSTATUS

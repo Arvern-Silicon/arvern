@@ -129,6 +129,8 @@ trap_handler:
     # MAIN TEST CODE
     #=================================================================
  _start:
+    csrsi 0x744, 8            # Smdbltrp: a trap in M-mode with NMIE=0 is an unexpected trap
+    csrw mstatush, x0        # MDT resets to 1; clear it or the first trap is an Smdbltrp double trap
     # Initialize stack pointer
     li   sp, 0x80010000
 

@@ -67,6 +67,7 @@ module  arv_decode (
 
 // FROM/TO LOAD-STORE UNIT
     input  wire           ex_ldst_ready_i,
+    input  wire           ex_ldst_ready_fetch_i,
     input  wire           wb_ldst_ready_i,
     input  wire           wb_load_busy_i,
     output wire     [4:0] ex_ldst_control_o,
@@ -83,6 +84,8 @@ module  arv_decode (
     input  wire           ex_uop_ready_i,
     input  wire           ex_uop_kill_i,
     input  wire           ex_uop_excp_abort_i,
+    input  wire           ex_uop_jt_fault_i,         // flop-sourced Zcmt table-read bus error (see arv_csr_traps)
+    output wire           ex_pmp_refetch_o,          // a PMP CSR write is in EX: the prefetch buffer is being discarded
     output wire     [9:0] ex_uop_control_o,
     output wire           ex_c_cm_push_nxt_o,
     output wire           id_uop_start_o,
@@ -97,6 +100,8 @@ module  arv_decode (
 
 // TRAPS & IRQ RELATED
     output wire           id_excp_ebreak_o,
+    output wire           id_excp_ebreak_nodbg_o,
+    output wire           id_issue_active_nodbg_o,
     output wire           id_excp_ecall_o,
     output wire           id_excp_illegal_inst_o,
     output wire           id_opcode_mret_o,
@@ -104,12 +109,18 @@ module  arv_decode (
     output wire           id_opcode_mnret_o,
 
 // TRAP INTERFACE FROM CSR
-    input  wire           trap_pending_i,
     input  wire           trap_stall_i,
+    input  wire           ex_excp_squash_i,
     input  wire           trap_branch_detect_i,
     input  wire    [31:0] trap_branch_target_i,
     input  wire           wfi_wakeup_i,
     output wire           id_wfi_active_o,
+
+// EXTERNAL DEBUG (Sdext)
+    input  wire           debug_stall_i,             // PRECISE debug halt (debug_mode | entry)
+    input  wire           debug_issue_hold_i,        // EARLY flop-sourced issue-hold superset from arv_csr_debug
+    input  wire           debug_ebreak_cfg_i,        // dcsr.ebreak* enable for the current privilege
+    input  wire           trig_break_issue_kill_i,   // Sdtrig action=0 execute trigger
 
 // PC PIPELINE OUTPUT
     output wire    [31:0] ex_pc_o,
@@ -138,8 +149,8 @@ parameter                 ZBC_EN       =  1'b0;      // Zbc extension enable (ca
 //--------------------------------------------------------------------------------------------------------------
 parameter                 MUL_EN       =  1'b0;      // Multiply enabled (Zmmul or M) - required for C.MUL
 parameter                 DIV_EN       =  1'b0;      // Divide enabled (M extension only) - DIV/DIVU/REM/REMU
+parameter           [4:0] PMP_NR       =  5'd0;      // PMP entries (0 = no PMP): gates the PMP-CSR refetch below
 //--------------------------------------------------------------------------------------------------------------
-parameter                 NMI_EN       =  1'b0;      // Smrnmi extension enable (resumable NMI)
 parameter                 SU_MODE_EN   =  1'b1;      // S+U privilege modes (0=M-only; 1=M+S+U)
 parameter                 ZIHPM_NR     =  0;         // Zihpm: number of HPM counters (0-8)
 //=================================================================================================================
@@ -158,11 +169,13 @@ localparam                C_EXT_EN     = (ZCA_EN | ZCB_EN | ZCMP_EN);
 
 // Compression / Standard instruction detection
 wire         ex_uop_has_branch;
-wire         id_use_c_path           = (id_instruction_i[1:0] != 2'b11) & ~ex_uop_has_branch & C_EXT_EN;
-wire         id_use_std_path         = (id_instruction_i[1:0] == 2'b11) & ~ex_uop_has_branch;
+wire         id_dispatch;                                                                // ID instruction committed to EX (id_instruction_request_o minus the EX-exception squash)
+wire         id_use_c_path             = (id_instruction_i[1:0] != 2'b11) & ~ex_uop_has_branch & C_EXT_EN;
+wire         id_use_std_path           = (id_instruction_i[1:0] == 2'b11) & ~ex_uop_has_branch;
+wire         trig_break_issue_kill_eff = trig_break_issue_kill_i & ~ex_uop_has_branch;   // Sdtrig exec-break kill, masked in the UOP final-branch cycle (see fetch_stall_from_debug)
 
-wire  [31:0] id_std_instruction      =  id_instruction_i;
-wire  [15:0] id_c_instruction        =  id_instruction_i[15:0]; // C instructions are pre-aligned in the fetch unit
+wire  [31:0] id_std_instruction        =  id_instruction_i;
+wire  [15:0] id_c_instruction          =  id_instruction_i[15:0]; // C instructions are pre-aligned in the fetch unit
 
 
 //==================================================================================================================================================//
@@ -171,7 +184,7 @@ wire  [15:0] id_c_instruction        =  id_instruction_i[15:0]; // C instruction
 //                                                                                                                                                  //
 //      31 30             25 24       21 20 19          15 14    12 11        8  7  6                 0                                             //
 //     +--+-----------------+-----------+--+--------------+--------+-----------+--+--------------------+                                            //
-//     |        funct7      |      rs2     |      rs1     | funct3 |      rd      |        opcode      |  R-Type  (Op-Imm-Reg)                      //
+//     |        funct7      |      rs2     |      rs1     | funct3 |      rd      |        opcode      |  R-Type  (Op-Reg-Reg)                      //
 //     +--+-----------------+-----------+--+--------------+--------+-----------+--+--------------------+                                            //
 //     |             imm[11:0]             |      rs1     | funct3 |      rd      |        opcode      |  I-Type  (Op-Imm-Reg, JALR, Load, System)  //
 //     +--+-----------------+-----------+--+--------------+--------+-----------+--+--------------------+                                            //
@@ -237,7 +250,7 @@ wire         id_std_opcode_error     = (id_use_std_path & ((id_std_instruction[1
                                                           ( id_std_opcode_system &  (id_std_funct3 == 3'b100))                              |  // Reserved SYSTEM funct3=100
                                                           ( id_std_opcode_system &  (id_std_funct3 == 3'b000)  &
                                                               ~(id_opcode_ecall | id_opcode_ebreak | id_opcode_wfi |
-                                                                id_opcode_mret  | id_opcode_sret   | (id_opcode_mnret & NMI_EN)))        )) |  // SYSTEM funct3=000 non-canonical priv-op
+                                                                id_opcode_mret  | id_opcode_sret   |  id_opcode_mnret))                  )) |  // SYSTEM funct3=000 non-canonical priv-op
                                        (~C_EXT_EN & (id_instruction_i[1:0] != 2'b11))                                                     ;    // Non-32-bit-encoded fetch with C extension disabled
 
 // Decode the Instruction types
@@ -344,12 +357,12 @@ wire         id_any_zbb              = id_zbb_andn   | id_zbb_orn  | id_zbb_xnor
 //////======================================================================================================================//////
 
 // Zba (Address Generation) - R-type instructions (opcode 0110011)
-// All Zba instructions compute: rd = rs1 + (rs2 << N) for array indexing
+// All Zba instructions compute: rd = rs2 + (rs1 << N) for array indexing
 wire         id_zba_opcode_op        = ZBA_EN & id_std_opcode_op & (id_std_funct7 == 7'b0010000);
 
-wire         id_zba_sh1add           = id_zba_opcode_op & (id_std_funct3 == 3'b010);  // rd = rs1 + (rs2 << 1)
-wire         id_zba_sh2add           = id_zba_opcode_op & (id_std_funct3 == 3'b100);  // rd = rs1 + (rs2 << 2)
-wire         id_zba_sh3add           = id_zba_opcode_op & (id_std_funct3 == 3'b110);  // rd = rs1 + (rs2 << 3)
+wire         id_zba_sh1add           = id_zba_opcode_op & (id_std_funct3 == 3'b010);  // rd = rs2 + (rs1 << 1)
+wire         id_zba_sh2add           = id_zba_opcode_op & (id_std_funct3 == 3'b100);  // rd = rs2 + (rs1 << 2)
+wire         id_zba_sh3add           = id_zba_opcode_op & (id_std_funct3 == 3'b110);  // rd = rs2 + (rs1 << 3)
 
 // Combined detection for any Zba instruction
 wire         id_any_zba              = id_zba_sh1add | id_zba_sh2add | id_zba_sh3add;
@@ -392,9 +405,6 @@ wire         id_any_zbs              = id_zbs_bset  | id_zbs_bclr  | id_zbs_binv
 wire         id_zbc_opcode_op        = ZBC_EN & id_std_opcode_op & (id_std_funct7 == 7'b0000101) & ~id_std_funct3[2];
 
 // Note: as CLMUL instruction are uniquely encoded using funct3, we can use the standard instruction path for decoding
-//wire       id_zbc_clmul            = id_zbc_opcode_op & (id_std_funct3 == 3'b001);  // Carry-less multiply (low)
-//wire       id_zbc_clmulh           = id_zbc_opcode_op & (id_std_funct3 == 3'b011);  // Carry-less multiply (high)
-//wire       id_zbc_clmulr           = id_zbc_opcode_op & (id_std_funct3 == 3'b010);  // Carry-less multiply (reverse)
 
 // Combined detection for any Zbc instruction
 wire         id_any_zbc              = id_zbc_opcode_op;
@@ -473,11 +483,11 @@ wire         id_c_bnez               =  ZCA_EN  & id_c_q1 & (id_c_funct3 == 3'b1
 
 // Quadrant 1 instructions (Zcb) - using reserved funct3=100 space with [12:10]=111
 wire         id_c_zext_b             =  ZCB_EN  & id_c_q1 & (id_c_funct3 == 3'b100)    & (id_c_instruction[12:10] == 3'b111) & (id_c_instruction[6:2] == 5'b11000);
-assign       id_c_sext_b             =  ZCB_EN  & id_c_q1 & (id_c_funct3 == 3'b100)    & (id_c_instruction[12:10] == 3'b111) & (id_c_instruction[6:2] == 5'b11001);
-assign       id_c_zext_h             =  ZCB_EN  & id_c_q1 & (id_c_funct3 == 3'b100)    & (id_c_instruction[12:10] == 3'b111) & (id_c_instruction[6:2] == 5'b11010);
-assign       id_c_sext_h             =  ZCB_EN  & id_c_q1 & (id_c_funct3 == 3'b100)    & (id_c_instruction[12:10] == 3'b111) & (id_c_instruction[6:2] == 5'b11011);
+assign       id_c_sext_b             =  ZCB_EN  & id_c_q1 & (id_c_funct3 == 3'b100)    & (id_c_instruction[12:10] == 3'b111) & (id_c_instruction[6:2] == 5'b11001) & ZBB_EN;  // C.SEXT.B require both Zcb AND Zbb
+assign       id_c_zext_h             =  ZCB_EN  & id_c_q1 & (id_c_funct3 == 3'b100)    & (id_c_instruction[12:10] == 3'b111) & (id_c_instruction[6:2] == 5'b11010) & ZBB_EN;  // C.ZEXT.H require both Zcb AND Zbb
+assign       id_c_sext_h             =  ZCB_EN  & id_c_q1 & (id_c_funct3 == 3'b100)    & (id_c_instruction[12:10] == 3'b111) & (id_c_instruction[6:2] == 5'b11011) & ZBB_EN;  // C.SEXT.H require both Zcb AND Zbb
 wire         id_c_not                =  ZCB_EN  & id_c_q1 & (id_c_funct3 == 3'b100)    & (id_c_instruction[12:10] == 3'b111) & (id_c_instruction[6:2] == 5'b11101);
-wire         id_c_mul                =  ZCB_EN  & id_c_q1 & (id_c_funct3 == 3'b100)    & (id_c_instruction[12:10] == 3'b111) & (id_c_instruction[6:5] == 2'b10)   & MUL_EN;  // C.MUL requires both Zcb AND (M or Zmmul)
+wire         id_c_mul                =  ZCB_EN  & id_c_q1 & (id_c_funct3 == 3'b100)    & (id_c_instruction[12:10] == 3'b111) & (id_c_instruction[6:5] == 2'b10)    & MUL_EN;  // C.MUL requires both Zcb AND (M or Zmmul)
 
 // Quadrant 2 instructions (Zca)
 // (C.SLLI rd=0 is reserved as a HINT and must execute as NOP).
@@ -775,7 +785,7 @@ wire         id_opcode_use_pc;
 wire         id_csr_active;
 
 // Detect when the ALU is active
-wire         id_alu_active           = id_opcode_valid & id_instruction_request_o & (id_type_R | id_type_I | id_type_U | id_opcode_use_pc) & !id_opcode_load & !id_csr_active;
+wire         id_alu_active           = id_opcode_valid & id_dispatch & (id_type_R | id_type_I | id_type_U | id_opcode_use_pc) & !id_opcode_load & !id_csr_active;
 
 // Standard mode operations (also shared by MUL/DIV operations).
 // Note for spec clarification: OP/OP-IMM ALU ops are selected by funct3 only.
@@ -832,13 +842,13 @@ wire         id_alu_select           = (id_alu_mode[2] & (id_zbb_min | id_zbb_mi
 // in the next-state expression).
 wire         ex_alu_ctrl_en        =  trap_branch_detect_i | ex_alu_ready_i;
 
-wire   [4:0] ex_alu_mode_nxt       =  trap_branch_detect_i ? 5'h0 :
-                                      id_alu_active        ? id_alu_mode : 5'h0;
+wire   [4:0] ex_alu_mode_nxt       =  trap_branch_detect_i ? 5'b00000 :
+                                      id_alu_active        ? id_alu_mode : 5'b00000;
 arv_dff #(.WIDTH(5), .ARST_EN(ARST_EN)) u_ex_alu_mode (
                   .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(ex_alu_ctrl_en), .d_i(ex_alu_mode_nxt), .q_o(ex_alu_mode_o));
 
-wire         ex_alu_select_nxt     =  trap_branch_detect_i ? 1'h0 :
-                                      id_alu_active        ? id_alu_select : 1'h0;
+wire         ex_alu_select_nxt     =  trap_branch_detect_i ? 1'b0 :
+                                      id_alu_active        ? id_alu_select : 1'b0;
 arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_ex_alu_select (
                     .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(ex_alu_ctrl_en), .d_i(ex_alu_select_nxt), .q_o(ex_alu_select_o));
 
@@ -877,14 +887,14 @@ assign       id_branch_rs2_fast_sel_o = id_instruction_i[1] ?         id_instruc
 //////======================================================================================================================//////
 //////======================================================================================================================//////
 
-wire         id_ldst_active          =  id_opcode_valid & id_instruction_request_o & (id_opcode_load | id_opcode_store);
-wire         id_load_active          =  id_opcode_valid & id_instruction_request_o &  id_opcode_load;
+wire         id_ldst_active          =  id_opcode_valid & id_dispatch & (id_opcode_load | id_opcode_store);
+wire         id_load_active          =  id_opcode_valid & id_dispatch &  id_opcode_load;
 
 // Priority: trap-flush > ~ready hold > active-load > clear. Holds only on ~ready,
-// so en = (trap_branch_detect_i & trap_pending_i) | ex_ldst_ready_i.
-wire         ex_ldst_ctrl_en       = (trap_branch_detect_i & trap_pending_i) | ex_ldst_ready_i;
-wire   [4:0] ex_ldst_control_nxt   = (trap_branch_detect_i & trap_pending_i) ? 5'b00000 :         // Flush stale load/store op on trap entry (not MRET/SRET)
-                                      id_ldst_active                         ? {id_funct3, id_opcode_load, id_opcode_store} : 5'b00000;
+// so en = trap_branch_detect_i | ex_ldst_ready_i.
+wire         ex_ldst_ctrl_en         = trap_branch_detect_i | ex_ldst_ready_i;
+wire   [4:0] ex_ldst_control_nxt     =  trap_branch_detect_i                   ? 5'b00000 :         // Flush a load/store still held in EX (e.g. a denied access waiting on HREADY) on any redirect
+                                        id_ldst_active                         ? {id_funct3, id_opcode_load, id_opcode_store} : 5'b00000;
 
 arv_dff #(.WIDTH(5), .ARST_EN(ARST_EN)) u_ex_ldst_control (
                       .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(ex_ldst_ctrl_en), .d_i(ex_ldst_control_nxt), .q_o(ex_ldst_control_o));
@@ -915,16 +925,16 @@ wire         id_opcode_fence_i       =  id_opcode_miscmem & (id_funct3 == 3'b001
 //////======================================================================================================================//////
 
 wire         id_opcode_csr           =  id_opcode_system & (id_funct3!=3'b000) & (id_funct3!=3'b100);
-assign       id_csr_active           =  id_opcode_valid  & id_instruction_request_o & id_opcode_csr;
+assign       id_csr_active           =  id_opcode_valid  & id_dispatch & id_opcode_csr;
 
 // Priority: trap-flush > ~ready hold > active-load > clear. Holds only on ~ready,
-// so en = (trap_branch_detect_i & trap_pending_i) | ex_csr_ready_i.
-wire         ex_csr_ctrl_en        = (trap_branch_detect_i & trap_pending_i) | ex_csr_ready_i;
-wire   [3:0] ex_csr_control_nxt    = (trap_branch_detect_i & trap_pending_i) ? 4'b0000 :          // Flush stale CSR op on trap entry (not MRET/SRET)
-                                      id_csr_active                          ? {(id_reg_src1_sel==5'h00),  // Detect if RS1==X0 for non-immediate or UIMM==0 for immediate
-                                                                                (id_reg_dest_sel==5'h00),  // Detects if RD=X0
-                                                                                 id_funct3[1:0]         }  // 01: CSRRW[I] | 10: CSRRS[I] | 11: CSRRC[I]
-                                                                             : 4'b0000;
+// so en = trap_branch_detect_i | ex_csr_ready_i.
+wire         ex_csr_ctrl_en          = trap_branch_detect_i | ex_csr_ready_i;
+wire   [3:0] ex_csr_control_nxt      =  trap_branch_detect_i                   ? 4'b0000 :                   // Flush a CSR op still held in EX on any redirect
+                                        id_csr_active                          ? {(id_reg_src1_sel==5'h00),  // Detect if RS1==X0 for non-immediate or UIMM==0 for immediate
+                                                                                  (id_reg_dest_sel==5'h00),  // Detects if RD=X0
+                                                                                   id_funct3[1:0]         }  // 01: CSRRW[I] | 10: CSRRS[I] | 11: CSRRC[I]
+                                                                               : 4'b0000;
 arv_dff #(.WIDTH(4), .ARST_EN(ARST_EN)) u_ex_csr_control (
                      .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(ex_csr_ctrl_en), .d_i(ex_csr_control_nxt), .q_o(ex_csr_control_o));
 
@@ -944,7 +954,7 @@ wire         ex_uop_busy;
 wire         ex_uop_ret_branch;
 
 // Combined activation signal for all Zcmp/Zcmt instructions
-wire         id_uop_active           =  id_opcode_valid & id_instruction_request_o & id_c_opcode_uop;
+wire         id_uop_active           =  id_opcode_valid & id_dispatch & id_c_opcode_uop;
 assign       id_uop_start_o          =  id_uop_active;
 assign       id_uop_jt_start_o       =  id_c_cm_jt | id_c_cm_jalt;
 
@@ -1062,6 +1072,7 @@ assign ex_uop_ret_branch_o = ex_uop_ret_branch;
 
 // Forward declaration
 wire         id_instruction_request_sys;
+wire         id_instruction_request_sys_nodbg;   // same, minus the debug-halt stall term
 
 // Decode instruction (handles both standard and compressed)
 assign       id_opcode_ecall         =  id_std_opcode_system & (id_funct3==3'b000) & (id_funct12==12'b000000000000) & (id_reg_src1_sel==5'b00000) & (id_reg_dest_sel==5'b00000)  ;
@@ -1084,21 +1095,33 @@ assign       id_opcode_sret_illegal  = id_opcode_sret   & ((~SU_MODE_EN         
                                                            ((id_priv_mode_i==2'b01) & cfg_trap_sret_i) | // trap in S-Mode if TSR is 1
                                                            (id_priv_mode_i==2'b00)                   ) ; // always trap in U-Mode
 
-// MNRET is only legal when NMI_EN=1 and only in M-mode.
-assign       id_opcode_mnret_illegal = id_opcode_mnret  & (~NMI_EN | (id_priv_mode_i!=2'b11));
+// MNRET is only legal in M-mode (Smrnmi is unconditionally present).
+assign       id_opcode_mnret_illegal = id_opcode_mnret  &  (id_priv_mode_i!=2'b11);
 
-// WFI is always legal in M mode. It is only legal in U and S modes if TW is 0.
-// (SU_MODE_EN=0: priv_mode is M at all times, so WFI is always legal)
-assign       id_opcode_wfi_illegal   = id_opcode_wfi    & SU_MODE_EN & cfg_timeout_wait_i & (id_priv_mode_i!=2'b11);
+// WFI is always legal in M mode. It is only legal in S mode if TW is 0. It is never legal in U mode.
+assign       id_opcode_wfi_illegal   = id_opcode_wfi    & SU_MODE_EN &
+                                       (((id_priv_mode_i!=2'b11) & cfg_timeout_wait_i) |  // TW=1: S and U
+                                         (id_priv_mode_i==2'b00)                      );  // U-mode: always
 
 // Send commands to Trap handler
 // Use id_instruction_request_sys (not id_instruction_request_o):
 // SYSTEM funct3=000 opcodes don't read RS1/RS2, so opcode-gated stalls cannot fire for them.
 assign       id_excp_ecall_o         = id_opcode_valid  & id_instruction_request_sys & id_opcode_ecall;
-assign       id_excp_ebreak_o        = id_opcode_valid  & id_instruction_request_sys & id_opcode_ebreak;
+assign       id_excp_ebreak_o        = id_opcode_valid  & id_instruction_request_sys       & id_opcode_ebreak;
+// Debug-entry view of the ebreak: NOT gated by fetch_stall_from_debug, so the ebreak
+// that triggers a Debug-Mode entry is recognised by that decision without being
+// suppressed by the debug stall it itself induces.
+assign       id_excp_ebreak_nodbg_o  = id_opcode_valid  & id_instruction_request_sys_nodbg & id_opcode_ebreak;
+// Generic "a valid instruction is at the id_pc boundary about to issue", NOT gated by the
+// debug-halt stall (same family as id_excp_ebreak_nodbg_o, minus the ebreak-opcode AND).
+// Uses id_instruction_valid_i, NOT id_opcode_valid: an execute trigger must fire on an
+// ILLEGAL instruction too (spec priority; also the early kill of optimization D would
+// otherwise deadlock on it - the kill suppresses the illegal trap via request_o).
+assign       id_issue_active_nodbg_o = id_instruction_valid_i & id_instruction_request_sys_nodbg & ~ex_excp_squash_i & ~ex_uop_has_branch;   // the ID slot is a shadow during the UOP final-branch cycle
+
 assign       id_opcode_mret_o        = id_opcode_valid  & id_instruction_request_sys & id_opcode_mret  & ~id_opcode_mret_illegal;
 assign       id_opcode_sret_o        = id_opcode_valid  & id_instruction_request_sys & id_opcode_sret  & ~id_opcode_sret_illegal;
-assign       id_opcode_mnret_o       = id_opcode_valid  & id_instruction_request_sys & id_opcode_mnret & ~id_opcode_mnret_illegal & NMI_EN;
+assign       id_opcode_mnret_o       = id_opcode_valid  & id_instruction_request_sys & id_opcode_mnret & ~id_opcode_mnret_illegal;
 
 
 //////======================================================================================================================//////
@@ -1111,9 +1134,9 @@ assign       id_opcode_mnret_o       = id_opcode_valid  & id_instruction_request
 
 assign       id_opcode_use_pc        = (id_opcode_auipc | id_opcode_jal | id_opcode_jalr);
 
-// Operand1: outer chain holds only on ~id_instruction_request_o, with a final
-// else => 0, so en = id_instruction_request_o. Inner branches all terminate.
-wire         ex_operand1_en        =  id_instruction_request_o;
+// Operand1: outer chain holds only on ~id_dispatch, with a final
+// else => 0, so en = id_dispatch. Inner branches all terminate.
+wire         ex_operand1_en        =  id_dispatch;
 wire  [31:0] ex_operand1_nxt       = (id_alu_active | id_c_cm_jalt) ?
                                           ( id_opcode_lui                      ?  32'h00000000             :
                                            (id_opcode_use_pc | id_c_cm_jalt)   ?  id_pc_i                  :
@@ -1127,14 +1150,13 @@ wire  [31:0] ex_operand1_nxt       = (id_alu_active | id_c_cm_jalt) ?
 arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_ex_operand1 (
                    .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(ex_operand1_en), .d_i(ex_operand1_nxt), .q_o(ex_operand1_o));
 
-// Operand2: same en = id_instruction_request_o, BUT the inner (id_alu_active|jalt)
-// branch has no final else => implicit hold, so its default falls back to ex_operand2_o.
-wire         ex_operand2_en        =  id_instruction_request_o;
+// Operand2: same en = id_dispatch. An ALU op is R, I/U-type or jal/jalr, so the
+// immediate is the inner default.
+wire         ex_operand2_en        =  id_dispatch;
 wire  [31:0] ex_operand2_nxt       = (id_alu_active | id_c_cm_jalt) ?
                                           ( id_type_R                                ?  id_reg_src2_rdata_w_fwd_i :
                                            (id_opcode_jal | id_opcode_jalr | id_c_cm_jalt) ? (id_use_std_path ? 32'h00000004 : 32'h00000002) :
-                                           (id_type_I | id_type_U)                   ?  id_operand_immediate :
-                                                                                        ex_operand2_o) : // inner implicit hold (no final else)
+                                                                                        id_operand_immediate) :
                                        id_ldst_active ?  id_operand_immediate :
                                        id_csr_active  ?  id_operand_immediate :
                                        id_uop_active  ? (id_uop_pushpop ? {25'h0000000, id_uop_sp_adj} : id_reg_src2_rdata_w_fwd_i) :
@@ -1143,8 +1165,8 @@ arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_ex_operand2 (
                    .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(ex_operand2_en), .d_i(ex_operand2_nxt), .q_o(ex_operand2_o));
 
 // Selection of the destination register for the ALU and LOAD unit
-// Holds only on ~id_instruction_request_o, final else => 0, so en = id_instruction_request_o.
-wire         ex_reg_dest_sel_en    =  id_instruction_request_o;
+// Holds only on ~id_dispatch, final else => 0, so en = id_dispatch.
+wire         ex_reg_dest_sel_en    =  id_dispatch;
 wire   [4:0] ex_reg_dest_sel_nxt   = (id_alu_active | id_load_active | id_csr_active) ? id_reg_dest_sel :
                                        id_uop_active ? (id_c_cm_jalt ? 5'd1 : (id_uop_pushpop ? 5'd2 : id_uop_mv_dest2)) :
                                                        5'b00000;
@@ -1153,8 +1175,9 @@ arv_dff #(.WIDTH(5), .ARST_EN(ARST_EN)) u_ex_reg_dest_sel (
 
 // PC pipeline: track instruction PC through EX stage for MEPC save on trap.
 // Two hold conditions (explicit ~request and implicit request & ~opcode_valid),
-// so en = id_instruction_request_o & id_opcode_valid, d = id_pc_i.
-wire         ex_pc_en              =  id_instruction_request_o & id_opcode_valid;
+// so en = id_dispatch & id_opcode_valid, d = id_pc_i. It also loads in the UOP
+// final-branch flush cycle; nothing reads ex_pc before the next dispatch then.
+wire         ex_pc_en              =  id_dispatch & id_opcode_valid;
 arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_ex_pc (
              .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(ex_pc_en), .d_i(id_pc_i), .q_o(ex_pc_o));
 
@@ -1169,10 +1192,12 @@ arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_ex_pc (
 //////                                                                                                                      //////
 //////   Timing optimizations applied in this section:                                                                      //////
 //////                                                                                                                      //////
-//////     A. id_request_fast (branch detect): omits all opcode-gated stalls from thebranch-detect expression.              //////
+//////     A. id_request_fast (branch detect): omits all opcode-gated stalls from the branch-detect expression.             //////
 //////        Those stalls are mutually exclusive with JAL/JALR/BRANCH opcodes, so omitting them is functionally            //////
 //////        correct and breaks the reconvergent fanout of id_use_std_path (inst_hrdata_i[0]) through the                  //////
 //////        stall NOR - cutting one critical-path gate level from id_branch_detect_o.                                     //////
+//////        Cross-module reliance: id_request_fast also omits fetch_stall_from_jt_branch; safe because arv_fetch          //////
+//////        prioritizes id_slow_branch over the fast pair in the same cycle and branch_confirmed flushes the buffer.      //////
 //////                                                                                                                      //////
 //////     B. id_bt_c_b carry-select adder: CB-type immediate has id_c_imm_b[31:8] = {24{sign}}, so routing the sign bit    //////
 //////        through a high-fanout buffer into a full 32-bit adder creates a long chain. Instead, three high-part          //////
@@ -1180,12 +1205,22 @@ arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_ex_pc (
 //////        The final mux needs just the sign and the low carry.                                                          //////
 //////                                                                                                                      //////
 //////     C. id_branch_target_o flat AND-OR mux: avoids the N-stage cascaded MUX2 of a priority chain.                     //////
-//////        Each (select, adder) pair meets at a single AND gate; all 8 are OR'd in a 2-level tree - 3 gate levels        //////
+//////        Each (select, adder) pair meets at a single AND gate; the 6 fast terms OR into a 2-level tree - 3 gate levels //////
 //////        total vs ~8-stage cascade.                                                                                    //////
 //////        bt_s_stdbr is simply  id_std_opcode_branch & ~id_bt_hi  (a 2-input AND, one inverted input): a                //////
 //////        standard branch opcode is mutually exclusive with jalr/jal/c-branch by opcode, so it only needs to            //////
 //////        defer to the id_bt_hi (trap / UOP-JT) high-priority override - no accumulated exclusion chain, so             //////
 //////        its depth is bounded by a single gate, not an accumulated 7-condition chain.                                  //////
+//////                                                                                                                      //////
+//////     D. EARLY (flop-sourced) debug/trigger holds: the Sdext/Sdtrig same-cycle entry sources are derived from          //////
+//////        inst_hrdata (opcode decode -> issue-active/ebreak -> trigger fire / debug entry) and used to round-trip       //////
+//////        decode -> arv_debug_trigger / arv_csr_debug -> back into these stall NORs, putting 3 module crossings         //////
+//////        IN SERIES with the branch-detect path. Instead: trig_break_issue_kill_i and debug_issue_hold_i are built      //////
+//////        upstream from the flop-only trigger MATCH (no issue-active qualifier) and flop-only entry sources, and        //////
+//////        the ebreak-into-debug hold is rebuilt locally as (id_excp_ebreak_nodbg & debug_ebreak_cfg_i). The holds       //////
+//////        are supersets of the precise ones: extra assertion cycles coincide with cycles where nothing dispatches       //////
+//////        (or another stall already holds), and every hold resolves through the real fire's trap/debug redirect.        //////
+//////        State-changing consumers (trap capture, debug-mode entry) keep the precise issue-qualified fire.              //////
 //////                                                                                                                      //////
 //////======================================================================================================================//////
 
@@ -1194,6 +1229,9 @@ wire         fetch_stall_from_ex;
 wire         fetch_stall_from_trap;
 wire         fetch_stall_from_jt_branch;
 wire         fetch_stall_from_wfi;
+wire         fetch_stall_from_pmp_wr;
+wire         fetch_stall_from_debug;
+wire         fetch_stall_from_debug_fast;
 wire         id_jalr_stall_rs1_wo_fwd;
 wire         id_jalr_shadow_valid_fast;
 wire         id_br_stall_w_fwd;
@@ -1203,13 +1241,19 @@ wire         id_branch_taken;
 // 1. Branch detection & cancel
 //-----------------------------------------------------------------------------
 
-// id_request_fast: timing optimisation A - see section header above.
-wire         id_request_fast         = ~(fetch_stall_from_ex   |
-                                         fetch_stall_from_trap |
-                                         fetch_stall_from_wfi  );
+// id_request_fast: timing optimisations A and D - see section header above. The debug
+// term omits the ebreak-into-debug leg: ebreak is opcode-exclusive with JAL/JALR/BRANCH
+// (same argument as A).
+wire         id_request_fast         = ~(fetch_stall_from_ex         |
+                                         fetch_stall_from_trap       |
+                                         fetch_stall_from_wfi        |
+                                         fetch_stall_from_pmp_wr     |
+                                         fetch_stall_from_debug_fast |
+                                         trig_break_issue_kill_eff  );
 
 // Fast branches only: trap, ZCMT-JT and FENCE.I are on the slow path (id_slow_branch_o)
-assign       id_branch_detect_o      =  (id_instruction_request_o & ex_uop_has_branch & ~ex_uop_kill_i)                                                         |  // UOP final branch (POPRET/POPRETZ): registered, safe
+assign       id_branch_detect_o      =  ex_uop_has_branch ?
+                                        (id_instruction_request_o & ~ex_uop_kill_i & ~ex_uop_jt_fault_i)                                                      :  // UOP final branch (POPRET/POPRETZ, CM.JT/JALT): flop-sourced qualifiers only
                                         (id_request_fast & id_instruction_valid_i & ( id_opcode_jal                                                             |  // JAL: no hazard stall possible
                                                                                      (id_opcode_jalr   & ~id_jalr_stall_rs1_wo_fwd & id_jalr_shadow_valid_fast) |  // JALR: stall if rs1 hazard or shadow miss
                                                                                      (id_opcode_branch & ~id_br_stall_w_fwd)));                                    // BRANCH: stall if rs1/rs2 hazard
@@ -1230,11 +1274,11 @@ wire         id_branch_dispatch_reg;
 arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_id_branch_taken (
                       .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(id_branch_taken), .q_o(id_branch_taken_reg));
 
-wire         id_branch_dispatch_nxt = (id_instruction_request_o & id_opcode_valid & id_opcode_branch & ~trap_branch_detect_i);
+wire         id_branch_dispatch_nxt = (id_dispatch & id_opcode_valid & id_opcode_branch & ~trap_branch_detect_i);
 arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_id_branch_dispatch (
                          .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(id_branch_dispatch_nxt), .q_o(id_branch_dispatch_reg));
 
-assign       id_branch_cancel_o      =  (id_branch_dispatch_reg & ~id_branch_taken_reg);
+assign       id_branch_cancel_o     = (id_branch_dispatch_reg & ~id_branch_taken_reg);
 
 
 //-----------------------------------------------------------------------------
@@ -1247,9 +1291,8 @@ assign       id_branch_cancel_o      =  (id_branch_dispatch_reg & ~id_branch_tak
 //   _c_b      : C.BEQZ / C.BNEZ,         base = PC,          imm = id_c_imm_b   (CB-type,  9-bit) - carry-select (opt B)
 //   _jalr_0   : C.JALR / C.JR / UOP-RET, base = jalr_shadow, imm = 0
 //
-// Adders are inlined directly (no sub-module boundary): the RTL reconvergence
-// between carry chains and mux-select signals that previously required a separate
-// sub-module has been resolved at the RTL level.
+// Adders are inlined directly (no sub-module boundary) so synthesis can
+// optimize the carry chains and mux selects together.
 //-----------------------------------------------------------------------------
 
 wire  [31:0] id_bt_std_jalr          = (id_jalr_shadow_rdata_i + id_std_imm_i) & 32'hFFFFFFFE;
@@ -1273,14 +1316,9 @@ wire  [11:0] id_bt_std_jal_hi        = (~id_std_imm_j[20] & ~id_bt_std_jal_lo_c)
                                                                                    id_bt_std_jal_hi_A ;
 wire  [31:0] id_bt_std_jal           = {id_bt_std_jal_hi, id_bt_std_jal_lo21[19:0]};
 
-// id_bt_c_j: carry-select adder - timing optimisation, see section header above.
-// id_c_imm_j[31:11] = {21{id_c_instruction[12]}}: all high bits are the same sign.
-// Pre-compute three high-part candidates from registered id_pc_i (arrives early):
-//   sign=0, lo_carry=0  ->  hi = PC[31:11]
-//   sign=0, lo_carry=1  ->  hi = PC[31:11] + 1
-//   sign=1, lo_carry=0  ->  hi = PC[31:11] − 1  (adding 21'h1FFFFF)
-//   sign=1, lo_carry=1  ->  hi = PC[31:11]      (21'h1FFFFF + carry wraps to 0)
-// The low 11-bit sum and its carry are the only things on the critical path.
+// id_bt_c_j: carry-select adder - same scheme as id_bt_std_jal above.
+// id_c_imm_j[31:11] = {21{id_c_instruction[12]}}; only the low 11-bit sum
+// and its carry are on the critical path.
 wire  [11:0] id_bt_c_j_lo12          = {1'b0, id_pc_i[10:0]} + {1'b0, id_c_imm_j[10:0]};
 wire         id_bt_c_j_lo_c          =   id_bt_c_j_lo12[11];
 wire  [20:0] id_bt_c_j_hi_A          =   id_pc_i[31:11];
@@ -1292,14 +1330,9 @@ wire  [20:0] id_bt_c_j_hi            = (~id_c_imm_j[11] & ~id_bt_c_j_lo_c) ? id_
                                                                              id_bt_c_j_hi_A ;
 wire  [31:0] id_bt_c_j               = {id_bt_c_j_hi, id_bt_c_j_lo12[10:0]};
 
-// id_bt_std_br: carry-select adder - timing optimisation D, see section header above.
-// id_std_imm_b[31:12] = {20{id_std_instruction[31]}}: all high bits are the same sign.
-// Pre-compute three high-part candidates from registered id_pc_i (arrives early):
-//   sign=0, lo_carry=0  ->  hi = PC[31:12]
-//   sign=0, lo_carry=1  ->  hi = PC[31:12] + 1
-//   sign=1, lo_carry=0  ->  hi = PC[31:12] − 1  (adding 20'hFFFFF)
-//   sign=1, lo_carry=1  ->  hi = PC[31:12]      (20'hFFFFF + carry wraps to 0)
-// The low 12-bit sum and its carry are the only things on the critical path.
+// id_bt_std_br: carry-select adder - timing optimisation B, same scheme as id_bt_std_jal above.
+// id_std_imm_b[31:12] = {20{id_std_instruction[31]}}; only the low 12-bit sum
+// and its carry are on the critical path.
 wire  [12:0] id_bt_std_br_lo13       = {1'b0, id_pc_i[11:0]} + {1'b0, id_std_imm_b[11:0]};
 wire         id_bt_std_br_lo_c       =   id_bt_std_br_lo13[12];
 wire  [19:0] id_bt_std_br_hi_A       =   id_pc_i[31:12];
@@ -1311,14 +1344,9 @@ wire  [19:0] id_bt_std_br_hi         = (~id_std_imm_b[12] & ~id_bt_std_br_lo_c) 
                                                                                   id_bt_std_br_hi_A ;
 wire  [31:0] id_bt_std_br            = {id_bt_std_br_hi, id_bt_std_br_lo13[11:0]};
 
-// id_bt_c_b: carry-select adder - timing optimisation B, see section header above.
-// id_c_imm_b[31:8] = {24{id_c_instruction[12]}}: all high bits are the same sign.
-// Pre-compute three high-part candidates from registered id_pc_i (arrives early):
-//   sign=0, lo_carry=0  ->  hi = PC[31:8]
-//   sign=0, lo_carry=1  ->  hi = PC[31:8] + 1
-//   sign=1, lo_carry=0  ->  hi = PC[31:8] − 1  (adding 24'hFFFFFF)
-//   sign=1, lo_carry=1  ->  hi = PC[31:8]       (24'hFFFFFF + carry wraps to 0)
-// The low 8-bit sum and its carry are the only things on the critical path.
+// id_bt_c_b: carry-select adder - timing optimisation B, same scheme as id_bt_std_jal above.
+// id_c_imm_b[31:8] = {24{id_c_instruction[12]}}; only the low 8-bit sum
+// and its carry are on the critical path.
 wire   [8:0] id_bt_c_b_lo9           = {1'b0, id_pc_i[7:0]} + {1'b0, id_c_imm_b[7:0]};
 wire         id_bt_c_b_lo_c          =   id_bt_c_b_lo9[8];
 wire  [23:0] id_bt_c_b_hi_A          =   id_pc_i[31:8];
@@ -1366,17 +1394,46 @@ assign       id_branch_target_o      = ({32{bt_s_jalr0  }} & id_bt_jalr_0  ) |
 // discarding the stale AHB address via the existing ignore_incoming / ~branch_target_fetched mechanism.
 wire         id_slow_fence_i         = id_instruction_request_o & id_instruction_valid_i & id_opcode_fence_i & ~id_bt_hi;
 
+// PMP CSR access (pmpcfg*/pmpaddr* 0x3A0-0x3EF, mseccfg/mseccfgh 0x747/0x757)
+// redirects fetch to the next instruction, FENCE.I-style: the prefetch buffer is
+// discarded so nothing checked against a superseded PMP configuration can issue.
+// Unlike FENCE.I the redirect is REGISTERED: the address decode lands in a flop at
+// dispatch and acts one cycle later, while the CSR op is in EX, as a stall of the
+// ID slot plus a slow branch to id_pc_i (= the instruction after the CSR op, which
+// cannot have dispatched). The fetch-side check runs at the data phase, after the
+// write has committed, so every refetched parcel sees the new configuration --
+// and nothing is added to the inst_hrdata -> inst_haddr loop.
+wire         ex_pmp_csr_wr;
+generate
+    if (PMP_NR != 5'd0) begin : g_pmp_refetch
+        wire   id_csr_pmp_addr   = ((id_instruction_i[31:24] >= 8'h3A)   & (id_instruction_i[31:24] <= 8'h3E) ) |
+                                    (id_instruction_i[31:20] == 12'h747) | (id_instruction_i[31:20] == 12'h757) ;
+        // Only an op that writes: csrrw/csrrwi always do, csrrs/csrrc(i) only with rs1/uimm != 0.
+        wire   id_csr_writes     = ~id_funct3[1] | (id_instruction_i[19:15] != 5'h00);
+        wire   id_csr_pmp_wr_nxt = id_dispatch & id_instruction_valid_i & id_opcode_csr & id_csr_pmp_addr & id_csr_writes;
+        arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_ex_pmp_csr_wr (
+                              .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(id_csr_pmp_wr_nxt), .q_o(ex_pmp_csr_wr));
+    end else begin : g_no_pmp_refetch
+        assign ex_pmp_csr_wr = 1'b0;
+    end
+endgenerate
+assign       fetch_stall_from_pmp_wr = ex_pmp_csr_wr;
+assign       ex_pmp_refetch_o        = ex_pmp_csr_wr;
+wire         id_slow_pmp_csr         = ex_pmp_csr_wr & ~trap_branch_detect_i;   // a trap redirect in the same cycle wins (it flushes too)
+wire         id_slow_refetch         = id_slow_fence_i | id_slow_pmp_csr;
+
 // id_slow_branch_o serves two roles for arv_fetch.v: (1) redirect the fetch
 // PC to id_slow_branch_target_o, and (2) freeze the AHB in the detect cycle
 // (via fetch_freeze_ahb), so no spurious sequential prefetch is committed
 // against the stale if_pc before the next-cycle redirect lands. Every slow-
 // branch source (trap, UOP table-jump, FENCE.I) wants both behaviours; if a
 // future "soft" redirect ever needs (1) without (2), split this into two signals.
-assign       id_slow_branch_o        = bt_s_trap | bt_s_uopjt | id_slow_fence_i;
+assign       id_slow_branch_o        = bt_s_trap | bt_s_uopjt | id_slow_refetch;
 
 assign       id_slow_branch_target_o = ({32{bt_s_trap      }} & trap_branch_target_i      ) |
                                        ({32{bt_s_uopjt     }} & ex_uop_jt_branch_target_i ) |
-                                       ({32{id_slow_fence_i}} & (id_pc_i + 32'd4)         ) ;
+                                       ({32{id_slow_fence_i}} & (id_pc_i + 32'd4)         ) |   // FENCE.I itself is in ID
+                                       ({32{id_slow_pmp_csr}} &  id_pc_i                  ) ;   // the CSR op is in EX; ID holds its successor
 
 
 //-----------------------------------------------------------------------------
@@ -1422,7 +1479,7 @@ endgenerate
 
 // UOP branch outputs to CSR Trap handler
 assign       ex_uop_has_branch_o     =  ex_uop_has_branch;
-assign       ex_uop_take_branch_o    = (id_instruction_request_o & ex_uop_has_branch & ~ex_uop_kill_i);
+assign       ex_uop_take_branch_o    = (id_dispatch & ex_uop_has_branch & ~ex_uop_kill_i & ~ex_uop_excp_abort_i);   // the committed UOP branch: the fetch leg above uses flop-sourced qualifiers only
 
 
 //-----------------------------------------------------------------------------
@@ -1592,7 +1649,6 @@ wire         id_hazard_in_wb         = (id_hazard_rs1_in_wb  | id_hazard_rs2_in_
 //                 - if ID instruction with forward    --> we stall during the whole EX phase, and then during wait state WB phase
 //                 - if ID instruction without forward --> we stall during the whole EX phase, and then during whole WB phase
 wire         id_load_stall_w_fwd     = (id_hazard_in_ex      & ex_load_busy) | ( id_hazard_in_wb     & wb_load_busy_i & ~wb_ldst_ready_i);
-//wire       id_load_stall_wo_fwd    = (id_hazard_in_ex      & ex_load_busy) | ( id_hazard_in_wb     & wb_load_busy_i);
 
 wire         id_load_stall_rs1_w_fwd  = (id_hazard_rs1_in_ex & ex_load_busy) | ( id_hazard_rs1_in_wb & wb_load_busy_i & ~wb_ldst_ready_i);
 wire         id_load_stall_rs1_wo_fwd = (id_hazard_rs1_in_ex & ex_load_busy) | ( id_hazard_rs1_in_wb & wb_load_busy_i);
@@ -1602,16 +1658,14 @@ wire         id_load_stall_rs1_wo_fwd = (id_hazard_rs1_in_ex & ex_load_busy) | (
 //
 //                 - if ID instruction with forward    --> we stall during wait state EX phase --> we always stall during EX wait state for all instructions even if no hazard
 //                 - if ID instruction without forward --> we stall during the whole EX phase (not for STORE)
-assign       id_other_stall_w_fwd    = (~ex_alu_ready_i | ~ex_csr_ready_i | ~ex_uop_ready_i | ~ex_ldst_ready_i);
-//assign     id_other_stall_wo_fwd   = ((ex_alu_busy    |  ex_csr_busy    |  ex_uop_busy)   &  id_hazard_in_ex);
+assign       id_other_stall_w_fwd      = (~ex_alu_ready_i | ~ex_csr_ready_i | ~ex_ldst_ready_fetch_i | ~ex_uop_ready_i);
 
-wire         id_other_stall_rs1_w_fwd  = (~ex_alu_ready_i | ~ex_csr_ready_i | ~ex_ldst_ready_i | ~ex_uop_ready_i);
+wire         id_other_stall_rs1_w_fwd  = (~ex_alu_ready_i | ~ex_csr_ready_i | ~ex_ldst_ready_fetch_i | ~ex_uop_ready_i);
 wire         id_other_stall_rs1_wo_fwd = (id_hazard_rs1_in_ex & (ex_alu_busy | ex_csr_busy | ex_uop_busy));
 
 
 // Combine it all
 wire         id_stall_w_fwd          = (id_load_stall_w_fwd      | id_other_stall_w_fwd     );
-//wire       id_stall_wo_fwd         = (id_load_stall_wo_fwd     | id_other_stall_wo_fwd    );
 wire         id_stall_rs1_w_fwd      = (id_load_stall_rs1_w_fwd  | id_other_stall_rs1_w_fwd );
 wire         id_stall_rs1_wo_fwd     = (id_load_stall_rs1_wo_fwd | id_other_stall_rs1_wo_fwd);
 
@@ -1626,9 +1680,23 @@ wire         fetch_stall_from_branch = (id_opcode_branch  &  id_br_stall_w_fwd  
 wire         fetch_stall_from_opimm  = (id_opcode_opimm   &  id_stall_rs1_w_fwd  );                                    // OP-IMM includes compressed variants (C.ADDI etc.) - must use class-aware stall
 wire         fetch_stall_from_opreg  = (id_opcode_op      &  id_stall_w_fwd      );                                    // OP includes compressed variants (C.ADD etc.) - must use class-aware stall
 wire         fetch_stall_from_csr    = (id_opcode_csr     & (id_std_load_stall_rs1_w_fwd | id_other_stall_rs1_w_fwd)); // CSR has no compressed equivalent: raw bits[19:15] safe
-wire         fetch_stall_from_fence  = (id_opcode_fence   & (~ex_ldst_ready_i | ~wb_ldst_ready_i | wb_load_busy_i));   // FENCE waits for all load/store operations to complete
-wire         fetch_stall_from_fence_i= (id_opcode_fence_i & (~ex_ldst_ready_i | ~wb_ldst_ready_i | wb_load_busy_i));   // FENCE.I waits for all stores to drain before issuing buffer flush
+// FENCE argument decoding. pred[27:24]={PI,PO,PR,PW}, succ[23:20]={SI,SO,SR,SW}.
+wire         id_fence_io             =  id_std_instruction[27] | id_std_instruction[26] |   // PI, PO
+                                        id_std_instruction[23] | id_std_instruction[22] ;   // SI, SO
+// The fence drains the LSU only for a fence naming I/O.
+// Non-I/O fences, FENCE.TSO and PAUSE cost nothing.
+wire         fetch_stall_from_fence  = (id_opcode_fence   & id_fence_io & (~wb_ldst_ready_i | wb_load_busy_i));
+wire         fetch_stall_from_fence_i= (id_opcode_fence_i &               (~wb_ldst_ready_i | wb_load_busy_i)); // FENCE.I: always -- it orders against the separate instruction bus, where the in-order argument above does not apply
+// PushPop store-data RAW across the uop boundary: uop store data reads the
+// NON-forwarded regfile port and the LSU's hazard_store_rs2 keys on decode's
+// ex_reg_src2_sel_o (forced 5'h00 during uop sequences), so a load's WB write
+// and the first push store's HWDATA capture land on the same clock edge --
+// hold PUSHPOP dispatch while a load is in EX/WB. Deliberately unconditional
+// on the pushed register list (comparators against up to 13 registers are not
+// worth a max cost of 2 stall cycles). Feeds id_instruction_request_o only --
+// off the inst_hrdata->inst_haddr branch-target critical path.
 wire         fetch_stall_from_uop    = (id_uop_pushpop    &  id_stall_rs1_wo_fwd )|                                    // PushPop: RS1=SP, no forwarding
+                                       (id_uop_pushpop    & (ex_load_busy | wb_load_busy_i))|                          // PushPop: store-data RAW across uop boundary (see above)
                                        (id_uop_mv         &  id_stall_w_fwd      );                                    // MVA/MVSA: RS1+RS2 with forwarding
 
 // Trap stall: CSR trap module stalls decode while waiting for pipeline drain
@@ -1650,21 +1718,38 @@ endgenerate
 
 // MRET/SRET/MNRET stall: must wait for any CSR write in EX to commit before
 // reading MEPC/SEPC/MNEPC (and MNSTATUS for MNRET privilege restore),
-// otherwise the register value is stale (RAW hazard). The (& NMI_EN) guard on
+// otherwise the register value is stale (RAW hazard). The MNRET term on
 // the MNRET term keeps it synthesized away when Smrnmi is disabled.
-wire         fetch_stall_from_xret   = (id_opcode_mret | id_opcode_sret | (id_opcode_mnret & NMI_EN)) & ex_csr_busy;
+wire         fetch_stall_from_xret   = (id_opcode_mret | id_opcode_sret |  id_opcode_mnret) & ex_csr_busy;
 
-// WFI stall: set on WFI decode, cleared by interrupt pending or reset.
-// Set has PRIORITY over clear: en = set | wfi_wakeup_i, nxt = set ? 1 : (wakeup ? 0 : hold).
+// WFI stall: set on WFI decode, cleared by interrupt pending, debug halt, or reset.
+// Set has PRIORITY over clear.
 wire         wfi_active;
 wire         wfi_active_set        =  id_opcode_valid & id_opcode_wfi & id_instruction_request_sys;
-wire         wfi_active_en         =  wfi_active_set | wfi_wakeup_i;
-wire         wfi_active_nxt        =  wfi_active_set ? 1'b1 : (wfi_wakeup_i ? 1'b0 : wfi_active);
+wire         wfi_active_clr        =  wfi_wakeup_i | debug_stall_i;
+wire         wfi_active_en         =  wfi_active_set | wfi_active_clr;
+wire         wfi_active_nxt        =  wfi_active_set ? 1'b1 : (wfi_active_clr ? 1'b0 : wfi_active);
 arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_wfi_active (
                  .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(wfi_active_en), .d_i(wfi_active_nxt), .q_o(wfi_active));
 
 assign       fetch_stall_from_wfi    = wfi_active;
 assign       id_wfi_active_o         = wfi_active;
+
+// Debug halt: WFI-style issue stall. TIMING-SPLIT (optimization D, see the branch section header) into:
+//
+//   fetch_stall_from_debug_fast: the EARLY flop-sourced hold from arv_csr_debug -
+//     the only debug term allowed on id_request_fast (branch detect).
+//   fetch_stall_from_debug: adds the ebreak-into-debug hold, rebuilt locally instead
+//     of round-tripping through arv_csr_debug (loop-free: _nodbg form & flop-sourced cfg).
+//
+// The PRECISE debug_stall_i is used only by the WFI clear above (an early hold
+// there would wake WFI on a mere Sdtrig PC match - a semantic change we avoid).
+// Masked during the UOP final-branch cycle (ex_uop_has_branch): the sequencer
+// completes unconditionally, so the branch must issue now or the RET is lost.
+// The hold re-asserts one cycle later at the branch target (dpc then = target).
+assign       fetch_stall_from_debug_fast =  debug_issue_hold_i & ~ex_uop_has_branch;
+assign       fetch_stall_from_debug      = (debug_issue_hold_i |
+                                           (id_excp_ebreak_nodbg_o & debug_ebreak_cfg_i)) & ~ex_uop_has_branch;
 
 assign       id_instruction_request_o = ~(fetch_stall_from_ex        |
                                           fetch_stall_from_jalr      |
@@ -1680,18 +1765,34 @@ assign       id_instruction_request_o = ~(fetch_stall_from_ex        |
                                           fetch_stall_from_xret      |
                                           fetch_stall_from_trap      |
                                           fetch_stall_from_jt_branch |
-                                          fetch_stall_from_wfi       );
+                                          fetch_stall_from_wfi       |
+                                          fetch_stall_from_pmp_wr    |
+                                          fetch_stall_from_debug     |
+                                          trig_break_issue_kill_eff  );
 
 // SYSTEM opcodes with funct3=000 (ECALL/EBREAK/MRET/SRET/MNRET/WFI) don't use
 // RS1/RS2 in decode, so opcode-gated stalls (JALR, branch, opimm, opreg, CSR,
 // fence, UOP) are mutually exclusive with them and can never fire simultaneously.
 // Pipeline-gated stalls (xret, trap, wfi, jt_branch) CAN fire regardless of the
-// ID opcode and must all be included
-assign       id_instruction_request_sys = ~(fetch_stall_from_ex        |
-                                            fetch_stall_from_xret      |
-                                            fetch_stall_from_trap      |
-                                            fetch_stall_from_jt_branch |
-                                            fetch_stall_from_wfi       );
+// ID opcode and must all be included.
+// (note that the _nodbg form omits fetch_stall_from_debug)
+assign       id_instruction_request_sys_nodbg = ~(fetch_stall_from_ex        |
+                                                  fetch_stall_from_xret      |
+                                                  fetch_stall_from_trap      |
+                                                  fetch_stall_from_jt_branch |
+                                                  fetch_stall_from_wfi       |
+                                                  fetch_stall_from_pmp_wr    );
+
+// id_instruction_request_sys gates SYSTEM ops (MRET/SRET/ECALL/EBREAK/WFI). The
+// breakpoint kill is included here too: a trigger matching e.g. an MRET must NOT let it
+// execute (mret_taken would otherwise suppress trap_pending_set and drop the trigger trap).
+// The _nodbg form above deliberately omits BOTH debug and the kill -> match stays loop-free.
+assign       id_instruction_request_sys       = id_instruction_request_sys_nodbg & ~fetch_stall_from_debug & ~trig_break_issue_kill_eff & ~ex_excp_squash_i;
+
+// id_instruction_request_o tells fetch the ID slot is consumed; id_dispatch is what
+// decode commits. They differ only in an EX-stage exception cycle (see
+// ex_excp_squash_i): the ID instruction is dropped and the trap refetches.
+assign       id_dispatch                      = id_instruction_request_o & ~ex_excp_squash_i;
 
 
 //////======================================================================================================================//////
@@ -1703,16 +1804,19 @@ assign       id_instruction_request_sys = ~(fetch_stall_from_ex        |
 //////======================================================================================================================//////
 
 // Illegal instruction Trap detection
-assign       id_excp_illegal_inst_o = (id_instruction_request_o & id_instruction_valid_i & id_opcode_error);
+assign       id_excp_illegal_inst_o = (id_dispatch & id_instruction_valid_i & id_opcode_error);
 
 // Instruction retired: asserted each cycle an instruction is dispatched from decode.
-// Gated by (id_use_std_path | id_use_c_path) to suppress the UOP-branch shadow cycle:
-// when ex_uop_has_branch=1 (CM.POPRET / CM.POPRETZ final RET cycle), both path enables
-// are muted and the decoder is just being flushed -- without this gate id_inst_retired_o
-// would fire spuriously and minstret would over-count by 1 per CM.POPRET/POPRETZ.
-// (Reproducer: sim/rtl_sim/src/inst_zicntr_uop_count.{s,v})
-assign       id_inst_retired_o      = id_instruction_request_o & id_instruction_valid_i
-                                    & (id_use_std_path | id_use_c_path);
+// Gated by ~ex_uop_has_branch to suppress the UOP-branch shadow cycle: when
+// ex_uop_has_branch=1 (CM.POPRET / CM.POPRETZ final RET cycle) the decoder is just being
+// flushed -- without this gate id_inst_retired_o would fire spuriously and minstret would
+// over-count by 1 per CM.POPRET/POPRETZ.
+//
+// Deliberately NOT (id_use_std_path | id_use_c_path): at C_EXT_EN=0 an inst[1:0]!=2'b11
+// encoding matches neither path enable, yet it must still count as retired so that the
+// minstret_undo_o fired by its illegal-instruction trap has something to undo.
+assign       id_inst_retired_o      = id_dispatch & id_instruction_valid_i
+                                    & ~ex_uop_has_branch;
 
 // HPM pipeline event bus
 // [0] fetch stall:       instruction fetch not valid (instruction memory stalling)
@@ -1729,14 +1833,14 @@ generate
         // Registered to break long combinational paths (e.g. through ALU forwarding).
         // HPM counters tolerate a 1-cycle latency on event signals.
         wire [7:0] id_hpm_events_reg;
-        wire [7:0] id_hpm_events_nxt = { id_ldst_active & ~id_load_active,                                                  // [7] store
-                                         id_load_active,                                                                    // [6] load
-                                         id_branch_taken,                                                                   // [5] branch taken
-                                         id_instruction_request_o & id_opcode_valid & id_opcode_branch,                     // [4] branch decision (taken or not taken)
-                                        ~ex_csr_ready_i,                                                                    // [3] CSR stall
-                                        ~ex_alu_ready_i,                                                                    // [2] ALU stall
-                                        ~ex_ldst_ready_i,                                                                   // [1] LSU stall
-                                        ~id_instruction_valid_i};                                                          // [0] fetch stall
+        wire [7:0] id_hpm_events_nxt = { id_ldst_active & ~id_load_active,                    // [7] store
+                                         id_load_active,                                      // [6] load
+                                         id_branch_taken,                                     // [5] branch taken
+                                         id_dispatch & id_opcode_valid & id_opcode_branch,    // [4] branch decision (taken or not taken)
+                                        ~ex_csr_ready_i,                                      // [3] CSR stall
+                                        ~ex_alu_ready_i,                                      // [2] ALU stall
+                                        ~ex_ldst_ready_i,                                     // [1] LSU stall
+                                        ~id_instruction_valid_i};                             // [0] fetch stall
 
         arv_dff #(.WIDTH(8), .ARST_EN(ARST_EN)) u_id_hpm_events (
                             .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(id_hpm_events_nxt), .q_o(id_hpm_events_reg));
@@ -1748,13 +1852,43 @@ generate
 
     end else begin : gen_hpm_events_disabled
 
-       assign id_hpm_events_o = 8'h0;
+       assign id_hpm_events_o = 8'h00;
 
     end
 endgenerate
 
 // Lint cleanup
 wire [4:0] id_funct7_undecoded_unused = {id_funct7[6], id_funct7[4:1]};
+
+// Inputs whose consumers fold to constants in some configurations. Each sink is
+// generate-guarded so it exists ONLY where the signal is genuinely unused.
+generate
+    if (SU_MODE_EN == 1'b0) begin : gen_su_cfg_unused
+        wire       cfg_trap_sret_unused    = cfg_trap_sret_i;
+        wire       cfg_timeout_wait_unused = cfg_timeout_wait_i;
+    end
+
+    if (ZCMT_EN == 1'b0) begin : gen_jt_branch_active_unused
+        wire       ex_uop_jt_br_act_unused = ex_uop_jt_branch_active_i;
+    end
+
+    // id_m_invalid folds to 0 once both MUL and DIV are present.
+    if (MUL_EN == 1'b1 && DIV_EN == 1'b1) begin : gen_m_op_encoding_unused
+        wire       id_m_op_encoding_unused = id_m_op_encoding;
+    end
+
+    // Compressed fields are extracted in parallel with the standard path, so
+    // they exist even when no compressed extension is present -- at which
+    // point every consumer folds away.
+    if (C_EXT_EN == 1'b0) begin : gen_c_decode_unused
+        wire [2:0] id_c_funct3_unused        = id_c_funct3;
+        wire [5:0] id_c_funct6_unused        = id_c_funct6;
+        wire       id_c_q0_unused            = id_c_q0;
+        wire       id_c_q1_unused            = id_c_q1;
+        wire       id_c_q2_unused            = id_c_q2;
+        wire       id_c_nzimm_q1_b011_unused = id_c_nzimm_q1_b011_ne0;
+    end
+endgenerate
 
 endmodule // arv_decode
 

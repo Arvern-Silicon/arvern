@@ -19,6 +19,8 @@
 #   All tests are synchronous -- no testbench-driven IRQ needed.
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -164,6 +166,7 @@ handler_done:
  _start:
     # Initialize stack pointer
     li   sp, 0x80010000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
 
     # Initialize scratchpad base pointer
     li   s1, 0x80000000
@@ -211,6 +214,9 @@ handler_done:
 
     # Set MPP=11 (M-mode)
     li   t0, 0x1800
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Set MEPC to target after MRET

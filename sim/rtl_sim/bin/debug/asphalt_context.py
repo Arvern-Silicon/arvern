@@ -33,6 +33,8 @@ import sys
 import argparse
 import os
 
+from pitstop import load_pitstop_events
+
 
 # ---------------------------------------------------------------------------
 # Parsing
@@ -129,11 +131,30 @@ def find_pc_anchor(records, target_pc, nth):
 # Display
 # ---------------------------------------------------------------------------
 
-def print_context(records, anchor_idx, before, after):
-    """Print context lines around anchor_idx with >>> prefix on anchor line."""
+def print_context(records, anchor_idx, before, after, debug_events=None):
+    """Print context lines around anchor_idx with >>> prefix on anchor line.
+
+    External-debug events (from pitstop.log) whose cycle falls inside the
+    displayed window are interleaved in cycle order, prefixed with '#' so they
+    read as inline annotations (and are skippable by strict parsers).
+    """
     total = len(records)
     start = max(0, anchor_idx - before)
     end   = min(total - 1, anchor_idx + after)
+
+    # Debug events within the window's cycle span.
+    devs = []
+    if debug_events:
+        lo = records[start]['cycle']
+        hi = records[end]['cycle']
+        devs = [e for e in debug_events if lo <= e['cycle'] <= hi]
+    di = 0
+
+    def flush_debug(upto_cycle):
+        nonlocal di
+        while di < len(devs) and devs[di]['cycle'] < upto_cycle:
+            print(f"  # {devs[di]['_raw']}")
+            di += 1
 
     # Leading separator
     if start > 0:
@@ -141,11 +162,17 @@ def print_context(records, anchor_idx, before, after):
         print(f"--- ({skipped} instructions skipped) ---")
 
     for i in range(start, end + 1):
+        flush_debug(records[i]['cycle'])
         raw = records[i]['_raw'].rstrip('\n')
         if i == anchor_idx:
             print(f">>> {raw}")
         else:
             print(f"    {raw}")
+
+    # Any debug events at/after the last printed record's cycle (still in window)
+    while di < len(devs):
+        print(f"  # {devs[di]['_raw']}")
+        di += 1
 
     # Trailing separator
     if end < total - 1:
@@ -181,6 +208,8 @@ def main():
                         help='Instructions to show before anchor (default: 8)')
     parser.add_argument('--after', type=int, default=4, metavar='N',
                         help='Instructions to show after anchor (default: 4)')
+    parser.add_argument('--no-debug-events', action='store_true',
+                        help='Do not interleave external-debug events from pitstop.log')
 
     args = parser.parse_args()
 
@@ -192,6 +221,10 @@ def main():
     if not records:
         print(f"No data records found in {args.logfile}", file=sys.stderr)
         sys.exit(1)
+
+    debug_events = None
+    if not args.no_debug_events:
+        _dbg_path, debug_events = load_pitstop_events(args.logfile)
 
     # Locate anchor
     anchor_idx = None
@@ -231,7 +264,7 @@ def main():
         r = records[anchor_idx]
         print(f"Anchor: pc={args.pc} occurrence #{args.nth}  cycle={r['cycle']}\n")
 
-    print_context(records, anchor_idx, args.before, args.after)
+    print_context(records, anchor_idx, args.before, args.after, debug_events)
 
 
 if __name__ == '__main__':

@@ -20,6 +20,8 @@
 #   a0 = 1  ->  return to M-mode (set MPP = 11)
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -177,6 +179,7 @@ s_handler_done:
     #=================================================================
  _start:
     li   sp, 0x80010000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000        # Scratchpad base
 
     # Zero scratchpad

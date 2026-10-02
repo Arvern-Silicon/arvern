@@ -9,15 +9,21 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Full license text is available in the LICENSE file at the repository root.
 #----------------------------------------------------------------------------
-# Description: NESTED EXCEPTIONS
+# Description: NESTED EXCEPTIONS (Ssdbltrp double-trap delivery)
 #   Nested exception verification:
-#   - Exception during S-mode exception handler must trap to M-mode
-#   (in_s_excp_trap blocks re-delegation while sepc/scause are still live
-#   for an in-progress S-mode exception handler)
+#   - Exception during S-mode exception handler: hardware set sstatus.SDT on
+#   the S-mode trap entry, so with menvcfgh.DTE=1 (reset default) the nested
+#   exception is delivered to M-mode as an Ssdbltrp DOUBLE TRAP:
+#   mcause=16 (non-interrupt, direct vector), mtval=0,
+#   mtval2 (0x34B) = original cause code (2, illegal instruction),
+#   mepc / mstatus.MPP as a normal M trap.
 #   - Normal delegation still works after nested trap clears
 #
+#   This test locks the Ssdbltrp double-trap delivery contract for the
+#   exception-inside-exception case.
+#
 #   Note: nested exception during an S-mode IRQ handler IS delegated to S
-#   (the spec allows nesting; SIE blocks further S-IRQs, but not exceptions).
+#   when the handler clears sstatus.SDT first (re-entrancy contract).
 #   That case is covered by trap_s_nested_excp.{s,v}.
 #
 #   Convention: a0 controls trap handler return behavior:
@@ -28,6 +34,8 @@
 #   a1 = 0  ->  normal S-mode handler (advance SEPC, SRET)
 #   a1 = 1  ->  trigger illegal instruction inside S-mode exception handler
 #----------------------------------------------------------------------------
+
+.include "firmware_config.inc"
 
 .section .text
 .global main
@@ -53,10 +61,11 @@
 #   0x030: SCAUSE             (expect 8)
 #   0x034: s_trap_count       (expect 1)
 #
-# Phase 3 (nested: exception in S-mode handler -> M-mode):
-#   0x040: MCAUSE_nested      (expect 2, illegal instruction)
+# Phase 3 (nested: exception in S-mode handler -> M-mode double trap):
+#   0x040: MCAUSE_nested      (expect 16, Ssdbltrp double trap)
 #   0x044: MSTATUS_nested     (check MPP = 01, from S-mode)
 #   0x048: s_trap_count       (expect 1, only the original ECALL)
+#   0x04C: MTVAL2_nested      (expect 2, original cause = illegal inst)
 #
 # Phase 4 (verify delegation still works after nested trap):
 #   0x050: SCAUSE             (expect 8)
@@ -111,6 +120,13 @@ m_trap_handler:
     li   t4, 2
     beq  t3, t4, m_advance_mepc
 
+    # Ssdbltrp double trap (cause 16): save mtval2 (= original cause code),
+    # then advance past the doubled instruction like the illegal case (the
+    # doubled instruction here is the 4-byte .word illegal; m_advance_mepc
+    # sizes it from memory so 4 bytes are added).
+    li   t4, 16
+    beq  t3, t4, m_dbltrp
+
     j    m_handler_done
 
 m_ecall:
@@ -123,6 +139,11 @@ m_ecall:
     li   t4, 0x1800
     csrs mstatus, t4           # Set MPP = 11
     j    m_handler_done
+
+m_dbltrp:
+    csrr t4, 0x34B             # mtval2 = original (doubled) cause code
+    sw   t4, 0x4C(s1)          # Phase 3 MTVAL2_nested
+    # fall through to m_advance_mepc (mepc points at the doubled instruction)
 
 m_advance_mepc:
     # Determine instruction size (compressed vs standard)
@@ -189,7 +210,8 @@ s_trap_handler:
     li   a1, 0
 
     # Deliberately trigger an illegal instruction inside S-mode exception handler.
-    # Must trap to M-mode (NOT re-delegated to S-mode) because in_s_excp_trap=1.
+    # sstatus.SDT is still set from the S-mode trap entry, so with DTE=1 this
+    # is delivered to M-mode as an Ssdbltrp double trap (mcause=16, mtval2=2).
     .word 0xFFFFFFFF           # Illegal instruction (32-bit, bits[1:0]=11)
 
     # Execution continues here after M-mode handles it and MRETs back
@@ -215,6 +237,7 @@ s_handler_done:
     #=================================================================
  _start:
     li   sp, 0x80010000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000        # Scratchpad base
 
     # Zero scratchpad
@@ -234,6 +257,7 @@ s_handler_done:
     sw   t0, 0x40(s1)
     sw   t0, 0x44(s1)
     sw   t0, 0x48(s1)
+    sw   t0, 0x4C(s1)
     sw   t0, 0x50(s1)
     sw   t0, 0x54(s1)
 
@@ -283,6 +307,9 @@ s_handler_done:
     li   t0, 0x1800
     csrc mstatus, t0
     li   t0, 0x0800
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Clear MPIE
@@ -330,15 +357,17 @@ u_mode_p2:
 
 
     #=================================================================
-    # PHASE 3: Exception during S-mode handler -> M-mode
+    # PHASE 3: Exception during S-mode handler -> M-mode double trap
     #          Set MEDELEG to delegate both ECALL-from-U (bit 8)
     #          AND illegal instruction (bit 2) to S-mode.
-    #          U-mode ECALL -> delegated to S-mode handler.
-    #          S-mode handler triggers illegal instruction (.word 0).
-    #          Illegal inst in S-mode handler -> M-mode (NOT re-delegated)
-    #          because in_excp_trap=1 blocks delegation.
-    #          M-mode handles it: MCAUSE=2, MPP=01 (S-mode).
-    #          M-mode returns to S-mode handler, which finishes with SRET.
+    #          U-mode ECALL -> delegated to S-mode handler; the trap
+    #          entry sets sstatus.SDT (Ssdbltrp, DTE=1 reset default).
+    #          S-mode handler triggers an illegal instruction; it would
+    #          delegate to S (medeleg[2]=1) but SDT=1, so it is delivered
+    #          to M-mode as a DOUBLE TRAP: MCAUSE=16, MTVAL2=2 (original
+    #          cause), MPP=01 (S-mode), mepc = the doubled instruction.
+    #          M-mode handles it, returns to S-mode handler, which
+    #          finishes with SRET.
     #=================================================================
 
     # Set MEDELEG: delegate ECALL-from-U (bit 8) AND illegal inst (bit 2)
@@ -377,9 +406,9 @@ u_mode_p3:
     # In U-mode with delegation active for both ECALL-from-U and illegal inst
     li   a0, 0                 # Normal return from S-mode handler
     li   a1, 1                 # Tell S-mode handler to trigger nested exception
-    ecall                      # -> S-mode (delegated, SCAUSE=8)
-                               # S-mode handler triggers .word 0 (illegal inst)
-                               # -> M-mode (NOT re-delegated, MCAUSE=2, MPP=01)
+    ecall                      # -> S-mode (delegated, SCAUSE=8, SDT set by HW)
+                               # S-mode handler triggers illegal inst while SDT=1
+                               # -> M-mode DOUBLE TRAP (MCAUSE=16, MTVAL2=2, MPP=01)
                                # M-mode handles it, returns to S-mode handler
                                # S-mode handler finishes, SRETs back to U-mode
 

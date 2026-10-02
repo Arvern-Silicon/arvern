@@ -41,24 +41,43 @@ from parse_results import parse_log_file
 from .save_trace import save_trace as _save_trace
 
 
-def extract_rtl_config(config_obj: TestConfig) -> Dict[str, int]:
+def extract_rtl_config(config_obj: TestConfig, rtl_config_sel: Optional[str] = None) -> Dict[str, int]:
     """
-    Extract RTL configuration from test config.
+    Return the RTL parameter set a run is built with.
 
     Args:
-        config_obj: TestConfig instance
+        config_obj:     TestConfig instance (run_config.json)
+        rtl_config_sel: the value forwarded to `./run -rtl_config` (a persona
+                        name, a coverage-config name or a 1-based sweep index),
+                        or None for the run_config.json defaults
 
     Returns:
-        Dictionary of RTL parameters
+        Dictionary of RTL parameter name -> value
     """
-    rtl_config = {}
-    config_data = config_obj._config
+    rtl_cfg = config_obj._config.get("rtl_config", {})
+    defaults = {param: info.get("default", 0) for param, info in rtl_cfg.items()}
+    if not rtl_config_sel:
+        return defaults
 
-    if "rtl_config" in config_data:
-        for param, info in config_data["rtl_config"].items():
-            rtl_config[param] = info.get("default", 0)
-
-    return rtl_config
+    # Resolve exactly as runsim.py does for -rtl_config.
+    from rtl_sweep_configs import (PERSONAS, COVERAGE_CONFIGS, resolve_persona,
+                                   generate_configs, sweepable_params)
+    params = sweepable_params(rtl_cfg)
+    names = {lbl for lbl, _ in PERSONAS} | {lbl for lbl, _ in COVERAGE_CONFIGS}
+    if rtl_config_sel in names:
+        _label, values = resolve_persona(rtl_config_sel, params)
+    else:
+        try:
+            idx = int(rtl_config_sel)
+        except ValueError:
+            raise ValueError(f"--rtl-config '{rtl_config_sel}' is neither a sweep index nor a known persona")
+        _order, sweep = generate_configs(params, "all")
+        if not 1 <= idx <= len(sweep):
+            raise ValueError(f"--rtl-config {idx} out of range (1..{len(sweep)})")
+        _label, values = sweep[idx - 1]
+    out = dict(defaults)
+    out.update(values)
+    return out
 
 
 def parse_size_file(elf_file: Path, print_fn=print) -> Dict[str, int]:
@@ -177,7 +196,8 @@ def list_available_benchmarks(config: TestConfig) -> None:
 def run_benchmark(benchmark_name: str, run_args: Optional[List[str]] = None,
                   enable_dump: bool = False,
                   trace_dest: Optional[str] = None,
-                  buffered: bool = False) -> Tuple[bool, str, str]:
+                  buffered: bool = False,
+                  rtl_params: Optional[Dict[str, int]] = None) -> Tuple[bool, str, str]:
     """
     Run a benchmark test and save its execution trace.
 
@@ -211,6 +231,15 @@ def run_benchmark(benchmark_name: str, run_args: Optional[List[str]] = None,
     config_file = run_dir / "run_config.json"
     config = TestConfig(str(config_file))
 
+    # The RTL parameter set this run is built with. `./run -rtl_config X`
+    # regenerates arv_parameterization.v from the defaults on exit, so it must
+    # be resolved here, from the forwarded selection, not read back afterwards.
+    if rtl_params is None:
+        sel = None
+        if run_args and '-rtl_config' in run_args:
+            sel = run_args[run_args.index('-rtl_config') + 1]
+        rtl_params = extract_rtl_config(config, sel)
+
     def _fail(msg: str) -> Tuple[bool, str, str]:
         _print(msg)
         return (False, buf.getvalue() if buf is not None else "", "")
@@ -229,6 +258,10 @@ def run_benchmark(benchmark_name: str, run_args: Optional[List[str]] = None,
     cmd = [str(run_script), benchmark_name]
     if not enable_dump:
         cmd.append('-nodump')   # prevents ./run from overriding SIMULATION_NODUMP=0
+    # Benchmarks measure the core, not the bus protocol, and throughput is the point.
+    # The checker stays on by default everywhere else.
+    if not (run_args and '-disable_ahb_check' in run_args):
+        cmd.append('-disable_ahb_check')
     if run_args:
         cmd.extend(run_args)
 
@@ -329,6 +362,7 @@ def run_benchmark(benchmark_name: str, run_args: Optional[List[str]] = None,
             score_metric=benchmark_metric,
             size_info=size_info,
             quiet=buffered,
+            rtl_params=rtl_params,
         )
 
     score_str = f"{test_result.score:.2f} {benchmark_metric}"
@@ -364,7 +398,7 @@ Run without arguments to see list of available benchmarks:
     parser.add_argument('-m', '--mode', choices=['auto', 'std', 'comp'], default='auto',
                        help='Test mode: auto (default; picks comp when run_config.json has C_EXTENSION>=1, std otherwise), std, or comp (explicit)')
     parser.add_argument('--rtl-config', metavar='N_OR_NAME',
-                       help='Build + benchmark a specific RTL configuration. Accepts either a 1-based integer index into the sweep set or a persona name (minimal / medium / full). Forwarded to `./run` as `-rtl_config <value>`.')
+                       help='Build + benchmark a specific RTL configuration. Accepts either a 1-based integer index into the sweep set or a persona name (light / classic / performance / ultra, or a -dbg twin). Forwarded to `./run` as `-rtl_config <value>`.')
     parser.add_argument('--dump', action='store_true',
                        help='Enable waveform dumping (disabled by default for faster simulation)')
     parser.add_argument('extra_args', nargs='*', help='Additional arguments to pass to run script')
@@ -394,16 +428,14 @@ Run without arguments to see list of available benchmarks:
     # swept on its own, siblings would delete each other's in-flight tmp dirs.
     # We sweep here once, then pass RUNSIM_SKIP_SWEEP=1 to each subprocess
     # (set in run_benchmark()'s run_env) so workers skip their own sweep.
+    # The sweep is skipped (and said so) while another live session holds a
+    # lock in WORK/ -- see bin/work_session.py; our own lock is taken first so
+    # sessions started by hand while we run leave our workers' dirs alone.
     _run_dir = script_dir.parent.parent / "run"
     _work_base = _run_dir / "WORK"
-    if _work_base.is_dir():
-        import shutil as _shutil
-        for _d in _work_base.glob("tmp*"):
-            if _d.is_dir():
-                try:
-                    _shutil.rmtree(_d)
-                except OSError:
-                    pass
+    import work_session
+    work_session.acquire(str(_work_base))
+    work_session.sweep_tmp_dirs(str(_work_base))
 
     # In --all mode treat the batch like a regression: only keep failed-test
     # work dirs. Without this, every passing benchmark's tmp dir would survive

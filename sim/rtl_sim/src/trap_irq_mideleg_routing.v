@@ -23,6 +23,8 @@
 //   (verifies MSI is NOT cross-masked by an unrelated mideleg bit)
 //   Phase 4: mideleg.STI=1 + assert MTI (HW pin) -> trap cause 7 (M-mode)
 //   (verifies MTI is NOT cross-masked by an unrelated mideleg bit)
+//   Phase 5: mideleg.SEI=0 + irq_s_external pin from M -> mcause 0x80000009
+//   Phase 6: same from S-mode -> still M, MPP=S, mstatus.SIE untouched
 //
 //   Synchronisation invariants:
 //   - MIE stays 1 throughout the test; mie.{XIE} bit is set/unset per phase
@@ -40,6 +42,23 @@ integer jj;
 integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
+
+`define SPAD(byte_off)  ((byte_off)/4)
+`define MEM(byte_off)   ahb_bus_system_inst.sram_x_inst.mem[`SPAD(byte_off)]
+
+// mepc recorded at `val` must lie in [`lo`, `hi`) (both published by the firmware)
+task check_range;
+    input [31:0] val_off;
+    input [31:0] lo_off;
+    input [31:0] hi_off;
+    begin
+        if ((`MEM(val_off) < `MEM(lo_off)) || (`MEM(val_off) >= `MEM(hi_off)) || (`MEM(lo_off) == 32'h0)) begin
+            $display("ERROR: mepc 0x%h outside the spin loop [0x%h, 0x%h) %t ns", `MEM(val_off), `MEM(lo_off), `MEM(hi_off), $time);
+            error = error + 1;
+        end else
+            $display("PASS:  mepc 0x%h inside the spin loop [0x%h, 0x%h) %t ns", `MEM(val_off), `MEM(lo_off), `MEM(hi_off), $time);
+    end
+endtask
 
 initial begin
     @(posedge free_clk);
@@ -80,9 +99,44 @@ initial begin
     check_cpu_reg(7,  32'h00000001);
     check_cpu_reg(28, 32'h00000007);   // mcause = MTI (7)
 
+    /* ----- Phase 5: SEI to M-mode (mideleg.SEI=0), taken from M ----- */
+    @(probes_cpu.x31 == 32'h50505050);
+    @(posedge free_clk);
+    @(posedge free_clk);
+    irq_s_external = 1'b1;
+
+    @(probes_cpu.x31 == 32'h55555555);
+    irq_s_external = 1'b0;
+    check_cpu_reg(7,  32'h00000001);
+    check_cpu_reg(28, 32'h00000009);   // mcause = SEI (9)
+
+    /* ----- Phase 6: SEI to M-mode (mideleg.SEI=0), taken from S ----- */
+    @(probes_cpu.x31 == 32'h60606060);
+    @(posedge free_clk);
+    @(posedge free_clk);
+    irq_s_external = 1'b1;
+
+    @(probes_cpu.x31 == 32'h66666666);
+    irq_s_external = 1'b0;
+    check_cpu_reg(7,  32'h00000001);
+    check_cpu_reg(28, 32'h00000009);
+
     /* ----- End ----- */
     wait(probes_cpu.x31 == 32'hdeadbeef);
     random_irq_enable = 0;
+    repeat(40) @(posedge free_clk);
+
+    $display("--- phase 5: mcause = 0x80000009, mepc inside the M-mode spin loop ---");
+    check_mem_value(`SPAD(32'h40), 32'h80000009);
+    check_range(32'h44, 32'h48, 32'h4C);
+    $display("--- phase 6: mcause = 0x80000009, mepc inside the S-mode spin loop ---");
+    check_mem_value(`SPAD(32'h50), 32'h80000009);
+    check_range(32'h54, 32'h5C, 32'h60);
+    if ((`MEM(32'h58) & 32'h00001802) !== 32'h00000802) begin
+        $display("ERROR: mstatus in the M handler 0x%h: expected MPP=S (01) and SIE=1 %t ns", `MEM(32'h58), $time);
+        error = error + 1;
+    end else
+        $display("PASS:  mstatus in the M handler: MPP=S, SIE=1 untouched %t ns", $time);
 
     repeat(20) @(posedge free_clk);
     stimulus_done = 1;

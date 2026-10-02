@@ -146,7 +146,7 @@ initial
       check_cpu_reg(17, 32'hAAAAAAAA);
 
       // x18: Test 8 result - bclri(0xAAAAAAAA, 7)
-      check_cpu_reg(18, 32'hAAAAAAA2A);
+      check_cpu_reg(18, 32'hAAAAAA2A);
 
       // x19: Test 9 result - bclri(0x55555555, 12)
       check_cpu_reg(19, 32'h55554555);

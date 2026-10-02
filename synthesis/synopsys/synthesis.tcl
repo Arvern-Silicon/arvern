@@ -125,9 +125,9 @@ if {$WITH_DFT} {
     #set_dft_signal -view existing_dft -type Constant    -port scan_mode_i   -active_state 1
     set_dft_signal -view existing_dft -type ScanClock   -port hclk_i        -timing [list 45 55]
 
-    # hresetn_i is only an ASYNCHRONOUS reset when ASYNC_RST_EN=1. Declare it as a
-    # DFT Reset (a control held inactive during scan shift) ONLY in that case. With
-    # synchronous reset (ASYNC_RST_EN=0) hresetn_i is an ordinary data-path signal:
+    # hresetn_i and dbgresetn_i are only an ASYNCHRONOUS reset when ASYNC_RST_EN=1.
+    # Declare them as DFT Reset (a control held inactive during scan shift) ONLY in that case.
+    # With synchronous reset (ASYNC_RST_EN=0) hresetn_i is an ordinary data-path signal:
     # the scan mux bypasses it during shift, so it needs no async-reset DFT handling,
     # and declaring it as one is wrong (it steers scan/incremental-compile toward
     # async-reset cells -> a few stray async flops in an otherwise-sync netlist).
@@ -136,8 +136,14 @@ if {$WITH_DFT} {
     if {[info exists RTL_PARAM_ASYNC_RST_EN]} { set _dft_arst $RTL_PARAM_ASYNC_RST_EN }
     if {$_dft_arst} {
         set_dft_signal -view existing_dft -type Reset   -port hresetn_i     -active 0
+
+        set _dft_dbg 0
+        if {[info exists RTL_PARAM_DEBUG_EN]} { set _dft_dbg $RTL_PARAM_DEBUG_EN }
+        if {$_dft_dbg} {
+            set_dft_signal -view existing_dft -type Reset   -port dbgresetn_i    -active 0
+        }
     } else {
-        puts "DFT: synchronous reset (ASYNC_RST_EN=0) -- hresetn_i NOT declared as an async Reset."
+        puts "DFT: synchronous reset (ASYNC_RST_EN=0) -- hresetn_i & dbgresetn_i NOT declared as an async Reset."
     }
 
     # DFT Configuration
@@ -208,6 +214,10 @@ source ./report_area.tcl
 #=============================================================================#
 current_design $DESIGN_NAME
 
+# UCN-4 is a cosmetic self-inconsistency in DC's built-in 'verilog' name rule:
+# '_' is both the replacement character and a restricted character. The netlist
+# names it produces are still legal/unique Verilog, so suppress the benign warning.
+suppress_message UCN-4
 change_name -rules verilog -hierarchy
 
 write -hierarchy -format verilog -output "./results/$DESIGN_NAME.gate.v"

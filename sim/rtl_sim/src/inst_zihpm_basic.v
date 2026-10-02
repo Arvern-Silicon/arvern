@@ -33,8 +33,8 @@ reg [31:0] ctr_machine_val;
 reg [31:0] ctr_shadow_val;
 integer    ctr_base_word;
 
-// Scratchpad word address: mimpid at word 0, counter i data at words (1 + i*6)
-`define SPAD(byte_off)      (byte_off/4)
+// Scratchpad word address: marv_cfg at word 0, counter i data at words (1 + i*6)
+`define SPAD(byte_off)      ((byte_off)/4)
 `define CTR_SPAD_WORD(i)    (1 + (i)*6)
 
 initial
@@ -52,7 +52,7 @@ initial
 
 
       //=================================================================
-      // Wait for mimpid sync: firmware writes mimpid to scratchpad[0]
+      // Wait for marv_cfg sync: firmware writes marv_cfg to scratchpad[0]
       // and signals with x31 = 0x11111111.
       //=================================================================
       $display("");
@@ -60,21 +60,21 @@ initial
       $display("|                ZIHPM BASIC: HPM COUNTER TEST                       |");
       $display(" ====================================================================");
       $display("");
-      $display("Waiting for mimpid sync (0x11111111)...");
+      $display("Waiting for marv_cfg sync (0x11111111)...");
 
       @(probes_cpu.x31==32'h11111111);
       repeat(3) @(posedge free_clk);
 
-      begin : read_mimpid
-         reg [31:0] mimpid_rb;
+      begin : read_marv_cfg
+         reg [31:0] marv_cfg_rb;
          reg  [3:0] zihpm_nr;
 
-         mimpid_rb    = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h00)];
-         zihpm_nr     = mimpid_rb[23:20];
+         marv_cfg_rb  = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h00)];
+         zihpm_nr     = marv_cfg_rb[15:12];
          zihpm_nr_found = zihpm_nr;
 
-         $display("mimpid readback          : 0x%h  %t ns", mimpid_rb, $time);
-         $display("ZIHPM_NR (mimpid[23:20]) : %0d   %t ns", zihpm_nr, $time);
+         $display("marv_cfg readback          : 0x%h  %t ns", marv_cfg_rb, $time);
+         $display("ZIHPM_NR (marv_cfg[15:12]) : %0d   %t ns", zihpm_nr, $time);
 
          if (zihpm_nr == 0)
             $display("ZIHPM_NR=0: no HPM counters present, skipping counter tests");

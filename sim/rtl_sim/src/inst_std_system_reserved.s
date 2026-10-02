@@ -112,6 +112,8 @@ h_advance:
 
 
 _start:
+    csrsi 0x744, 8            # Smdbltrp: a trap in M-mode with NMIE=0 is an unexpected trap
+    csrw mstatush, x0        # MDT resets to 1; clear it or the first trap is an Smdbltrp double trap
     li   sp, 0x8000F000           # safe SP inside SRAM
     li   s1, 0x80000000
 

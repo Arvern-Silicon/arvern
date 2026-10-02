@@ -25,7 +25,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 // Drop the PLIC source line when the handler stores the claimed ID at
 // scratchpad[0x80] (this test only ever claims source 1).

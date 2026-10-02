@@ -27,7 +27,7 @@ reg [31:0] shadow_rb;
 reg [31:0] hi_after;
 reg [31:0] lo_after;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin

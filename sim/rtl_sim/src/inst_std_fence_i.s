@@ -137,6 +137,9 @@ main:
 	jalr x0, t0, 0              # jump into self-modified code
 
 patch_return:
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
 	csrsi mstatus, 8            # re-enable global interrupts (MIE=1)
 	#-------------------------------------------------
 	# END OF TEST

@@ -1,0 +1,21 @@
+{signal: [
+  {name: 'hclk_i',        wave: 'p.....'},
+  {},
+  ['APB master -> DM',
+    {name: 'dmi_psel_i',    wave: '01..0.'},
+    {name: 'dmi_penable_i', wave: '0.1.0.'},
+    {name: 'dmi_paddr_i',   wave: 'x3..x.', data: ['0x044']},
+    {name: 'dmi_pwrite_i',  wave: '0.....'},
+    {name: 'dmi_pwdata_i',  wave: 'x.....'},
+  ],
+  {},
+  ['DM -> APB master',
+    {name: 'dmi_pready_o',  wave: '0..10.'},
+    {name: 'dmi_prdata_o',  wave: 'x..5x.', data: ['0x000003A3']},
+    {name: 'dmi_pslverr_o', wave: '0.....'},
+  ],
+],
+  head: {text: 'DMI read (APB): SETUP, ACCESS, 1 wait state, then PREADY + PRDATA'},
+  foot: {text: 'PADDR 0x044 = DM register 0x11 (dmstatus); reg index = PADDR[8:2]'},
+  config: {hscale: 2}
+}

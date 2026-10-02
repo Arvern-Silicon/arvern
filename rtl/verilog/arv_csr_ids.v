@@ -10,7 +10,7 @@
 // Full license text is available in the LICENSE file at the repository root.
 //----------------------------------------------------------------------------
 // File Name          : arv_csr_ids.v
-// Module Description : RISC-V CSRs: read-only ID registers (mvendorid / marchid / mimpid / mhartid / misa)
+// Module Description : RISC-V CSRs: ID registers (mvendorid / marchid / mimpid / mhartid / mconfigptr / misa)
 //----------------------------------------------------------------------------
 `default_nettype none
 
@@ -21,6 +21,7 @@ module  arv_csr_ids (
     input  wire           bank_misa_en_i,
     input  wire           bank_ids_en_i,
     input  wire    [63:0] register_sel_i,
+    output wire    [31:0] marv_cfg_o,
     output wire    [31:0] ids_rdata_o
 
 );
@@ -30,13 +31,6 @@ module  arv_csr_ids (
 parameter                 C_EXT_EN            =  1'b0;        // Compressed instructions enabled
 parameter                 M_EXT_EN            =  1'b0;        // M extension enabled (multiply+divide)
 parameter                 B_EXT_EN            =  1'b0;        // B extension enabled (bit manipulation)
-parameter                 ZCA_EN              =  1'b0;        // Zca extension enable
-parameter                 ZCB_EN              =  1'b0;        // Zcb extension enable
-parameter                 ZCMP_EN             =  1'b0;        // Zcmp extension enable
-parameter                 ZCMT_EN             =  1'b0;        // Zcmt extension enable
-parameter                 ZBB_EN              =  1'b0;        // Zbb extension enable
-parameter                 ZBA_EN              =  1'b0;        // Zba extension enable
-parameter                 ZBS_EN              =  1'b0;        // Zbs extension enable
 parameter                 MUL_1C_EN           =  1'b0;        // Single-cycle multiplier
 parameter                 MUL_4C_EN           =  1'b0;        // Four-cycle multiplier
 parameter                 MUL_16C_EN          =  1'b0;        // Sixteen-cycle multiplier
@@ -44,18 +38,21 @@ parameter                 DIV_12C_EN          =  1'b0;        // Radix-8 divider
 parameter                 DIV_17C_EN          =  1'b0;        // Radix-4 divider (17 cycles)
 parameter                 DIV_33C_EN          =  1'b0;        // Radix-2 divider (33 cycles)
 parameter                 CCSR_EN             =  1'b1;        // Custom-CSR available
-parameter                 NMI_EN              =  1'b0;        // Smrnmi extension enable (resumable NMI)
-parameter                 SU_MODE_EN          =  1'b1;        // S+U privilege modes — drives misa[18] (S) and misa[20] (U)
+parameter                 DEBUG_EN            =  1'b0;
+parameter           [3:0] DM_TRIGGER_NR       =  4'd0;        // Sdtrig trigger count 0-8 (marv_cfg[11:8])
+parameter                 SU_MODE_EN          =  1'b1;        // S+U privilege modes - drives misa[18] (S) and misa[20] (U)
 parameter                 RV32I_EN            =  1'b1;        // RV32I base ISA (RV32E if 0)
 parameter                 ZICNTR_EN           =  1'b0;        // Zicntr extension enable (cycle, time, instret)
 parameter           [3:0] ZIHPM_NR            =  4'h0;        // Zihpm: number of HPM counters (0-8)
 parameter                 SINGLE_CYCLE_BRANCH =  1'b1;        // 1=zero-bubble taken branch (max IPC); 0=one-bubble (max Fmax)
-parameter                 ARST_EN             =  1'b1;        // Reset architecture: 1=asynchronous, 0=synchronous (advertised in mimpid[3])
-parameter          [11:0] RTL_VERSION         = 12'h000;      // RTL release version exposed through mimpid[31:20]
-parameter          [31:0] MVENDORID           = 32'h00000000; // JEDEC-encoded vendor ID
-parameter          [31:0] MARCHID             = 32'h00000000; // arvern architecture ID
+parameter                 ARST_EN             =  1'b1;        // Reset architecture: 1=asynchronous, 0=synchronous (marv_cfg[4])
+parameter          [23:0] RTL_VERSION         = 24'h000000;   // {major[7:0], minor[7:0], patch[7:0]} -> mimpid[31:8]
+parameter           [2:0] C_EXT_LEVEL         =  3'd0;        // C_EXTENSION level 0-4 (marv_cfg)
+parameter           [2:0] B_EXT_LEVEL         =  3'd0;        // B_EXTENSION level 0-4 (marv_cfg)
+parameter           [1:0] PMP_NR_FIELD        =  2'd0;        // 0=none, 1=4, 2=8, 3=16 entries (marv_cfg[7:6])
 
 localparam          [3:0] ZIHPM_NR_FIELD      = (ZIHPM_NR > 4'd8) ? 4'd8 : ZIHPM_NR;
+localparam          [3:0] DM_TRIGGER_NR_FIELD = DEBUG_EN ? ((DM_TRIGGER_NR > 4'd8) ? 4'd8 : DM_TRIGGER_NR) : 4'd0;
 
 //////======================================================================================================================//////
 //////                                       INTERNAL WIRES/REGISTERS/PARAMETERS DECLARATION                                //////
@@ -77,17 +74,20 @@ wire               [31:0] misa;
 //////======================================================================================================================//////
 //////======================================================================================================================//////
 
-// 0xF11 mvendorid : JEDEC manufacturer ID of the chip vendor integrator
-assign                    mvendorid      =  MVENDORID;
+// 0xF11 mvendorid : Arvern Silicon JEDEC manufacturer ID (provider of the core).
+// FIXED core constant, not an integration parameter (the chip is identified by the JTAG DTM IDCODE).
+// JEDEC JEP106 bank 18 (17 continuation bytes), final byte 0x7B (0xFB with odd parity):
+// mvendorid = (17 << 7) | (0xFB & 7'h7F) = 32'h0000_08FB.
+assign                    mvendorid      =  32'h000008FB;
 
-// 0xF12 marchid : architecture ID of the core. Allocated by RISC-V International.
-assign                    marchid        =  MARCHID;
+// 0xF12 marchid : aRVern architecture ID 54, allocated by RISC-V International (open-source registry, MSB=0). FIXED core constant.
+assign                    marchid        =  32'h00000036;
 
 assign                    mhartid        =  {24'h000000,
-                                             hartid_i             // Hart instance ID
+                                             hartid_i                   // Hart instance ID
                                             };
 
-assign                    mconfigptr     =   32'h00000000;        // Unsuported
+assign                    mconfigptr     =   32'h00000000;              // Unsupported
 
 // Compact 2-bit type encodings
 wire                [1:0] mul_type_id    =  ({2{MUL_1C_EN }} & 2'd1) |  // 1 = single-cycle
@@ -97,64 +97,73 @@ wire                [1:0] div_type_id    =  ({2{DIV_12C_EN}} & 2'd1) |  // 1 = r
                                             ({2{DIV_17C_EN}} & 2'd2) |  // 2 = radix-4  (17 cycles)
                                             ({2{DIV_33C_EN}} & 2'd3) ;  // 3 = radix-2  (33 cycles)
 
-// Implementation ID of the Hart
-assign                    mimpid         =  {RTL_VERSION,         // [31:20] :  RTL release version (12 bits)
-                                             ZIHPM_NR_FIELD,      // [19:16] :  Zihpm HPM counter count (0-8)
+// Implementation ID of the Hart.
+//
+// mimpid is architecturally an IMPLEMENTATION VERSION register, nothing more; the build
+// configuration lives in marv_cfg (0xFFF), see doc/arvern_instructions.md.
+//
+// One byte per version component, so the register reads as the version directly:
+//   0x0001_0200 = v0.1.2
+assign                    mimpid         =  {RTL_VERSION,               // [31: 8] : {major, minor, patch}
+                                             8'h00                      // [ 7: 0] : reserved
+                                            };
 
-                                             ZICNTR_EN,           // [15]    :  Zicntr extension enable (cycle, time, instret)
-                                             SINGLE_CYCLE_BRANCH, // [14]    :  1=zero-bubble taken branch (max IPC); 0=one-bubble (max Fmax)
-                                             NMI_EN,              // [13]    :  Smrnmi extension enable (resumable NMI)
-                                             CCSR_EN,             // [12]    :  Custom-CSR interface available
-
-                                             div_type_id,         // [11:10] :  Divider type    (0=none, 1=12cyc, 2=17cyc, 3=33cyc)
-                                             mul_type_id,         // [ 9: 8] :  Multiplier type (0=none, 1=1cyc,  2=4cyc,  3=16cyc)
-
-                                             ZCMT_EN,             // [ 7]    :  Zcmt extension enable
-                                             ZCMP_EN,             // [ 6]    :  Zcmp extension enable
-                                             ZCB_EN,              // [ 5]    :  Zcb extension enable
-                                             ZCA_EN,              // [ 4]    :  Zca extension enable
-
-                                             ARST_EN,             // [ 3]    :  Reset architecture (1=asynchronous, 0=synchronous)
-                                             ZBS_EN,              // [ 2]    :  Zbs extension enable
-                                             ZBA_EN,              // [ 1]    :  Zba extension enable
-                                             ZBB_EN               // [ 0]    :  Zbb extension enable
+// Build-configuration discovery register (custom, 0xFFF). One semantic owner per nibble, so a
+// hex dump decodes by eye. Reserved bits sit ABOVE the field they extend, so a field widens
+// upward and every published encoding keeps its bit position.
+assign                    marv_cfg_o     =  {4'b0000,                   // [31:28] : reserved
+                                             1'b0,                      // [27]    : reserved (C growth)
+                                             C_EXT_LEVEL,               // [26:24] : 0=none,1=Zca,2=+Zcb,3=+Zcmp,4=+Zcmt
+                                             1'b0,                      // [23]    : reserved (B growth)
+                                             B_EXT_LEVEL,               // [22:20] : 0=none,1=Zbb,2=+Zba,3=+Zbs,4=+Zbc
+                                             mul_type_id,               // [19:18] : 0=none,1=1cyc,2=4cyc,3=16cyc
+                                             div_type_id,               // [17:16] : 0=none,1=12cyc,2=17cyc,3=33cyc
+                                             ZIHPM_NR_FIELD,            // [15:12] : 0-8 mhpmcounter3-10
+                                             DM_TRIGGER_NR_FIELD,       // [11: 8] : 0-8 Sdtrig triggers
+                                             PMP_NR_FIELD,              // [ 7: 6] : 0=none,1=4,2=8,3=16 writable entries
+                                             SINGLE_CYCLE_BRANCH,       // [ 5]    : 1=zero-bubble taken branch
+                                             ARST_EN,                   // [ 4]    : 1=asynchronous reset
+                                             ZICNTR_EN,                 // [ 3]    : cycle/time/instret
+                                             SU_MODE_EN,                // [ 2]    : S+U present
+                                             DEBUG_EN,                  // [ 1]    : Sdext DM/DTM present
+                                             CCSR_EN                    // [ 0]    : custom-CSR interface
                                             };
 
 // Machine ISA Register
-assign                    misa           =  {         2'b01,      // [31:30] : MXL : Native base integer ISA width (1: 32; 2: 64; 3: Reserved)
-                                             4'b0000,             // [29:26] :  -  : Reserved
-                                             1'b0,                // [25]    :  Z  : Reserved
-                                             1'b0,                // [24]    :  Y  : Reserved
+assign                    misa           =  {         2'b01,            // [31:30] : MXL : Native base integer ISA width (1: 32; 2: 64; 3: Reserved)
+                                             4'b0000,                   // [29:26] :  -  : Reserved
+                                             1'b0,                      // [25]    :  Z  : Reserved
+                                             1'b0,                      // [24]    :  Y  : Reserved
 
-                                             1'b0,                // [23]    :  X  : Non-standard extensions present
-                                             1'b0,                // [22]    :  W  : Reserved
-                                             1'b0,                // [21]    :  V  : Vector extension
-                                                      SU_MODE_EN, // [20]    :  U  : User mode implemented
+                                             1'b0,                      // [23]    :  X  : Non-standard extensions present. Deliberately 0 even with CCSR_EN: X denotes non-standard *instruction-set* extensions; the CCSR space is the architecturally designated custom CSR region.
+                                             1'b0,                      // [22]    :  W  : Reserved
+                                             1'b0,                      // [21]    :  V  : Vector extension
+                                                      SU_MODE_EN,       // [20]    :  U  : User mode implemented
 
-                                             1'b0,                // [19]    :  T  : Reserved
-                                                      SU_MODE_EN, // [18]    :  S  : Supervisor mode implemented
-                                             1'b0,                // [17]    :  R  : Reserved
-                                             1'b0,                // [16]    :  Q  : Quad-precisin floating point extension
+                                             1'b0,                      // [19]    :  T  : Reserved
+                                                      SU_MODE_EN,       // [18]    :  S  : Supervisor mode implemented
+                                             1'b0,                      // [17]    :  R  : Reserved
+                                             1'b0,                      // [16]    :  Q  : Quad-precision floating point extension
 
-                                             1'b0,                // [15]    :  P  : Tentatively reserved for Packed-SIMD extension
-                                             1'b0,                // [14]    :  O  : Reserved
-                                             1'b0,                // [13]    :  N  : Tentatively reserved for User-Level Interrupts extension
-                                             M_EXT_EN,            // [12]    :  M  : Integer Multiply/Divide extension
+                                             1'b0,                      // [15]    :  P  : Tentatively reserved for Packed-SIMD extension
+                                             1'b0,                      // [14]    :  O  : Reserved
+                                             1'b0,                      // [13]    :  N  : Tentatively reserved for User-Level Interrupts extension
+                                             M_EXT_EN,                  // [12]    :  M  : Integer Multiply/Divide extension
 
-                                             1'b0,                // [11]    :  L  : Reserved
-                                             1'b0,                // [10]    :  K  : Reserved
-                                             1'b0,                // [ 9]    :  J  : Reserved
-                                             RV32I_EN,            // [ 8]    :  I  : RV32I/64I base ISA
+                                             1'b0,                      // [11]    :  L  : Reserved
+                                             1'b0,                      // [10]    :  K  : Reserved
+                                             1'b0,                      // [ 9]    :  J  : Reserved
+                                             RV32I_EN,                  // [ 8]    :  I  : RV32I/64I base ISA
 
-                                             1'b0,                // [ 7]    :  H  : Hypervisor extension
-                                             1'b0,                // [ 6]    :  G  : Reserved
-                                             1'b0,                // [ 5]    :  F  : Single-precision floating-point extension
-                                            ~RV32I_EN,            // [ 4]    :  E  : RV32E/64E base ISA
+                                             1'b0,                      // [ 7]    :  H  : Hypervisor extension
+                                             1'b0,                      // [ 6]    :  G  : Reserved
+                                             1'b0,                      // [ 5]    :  F  : Single-precision floating-point extension
+                                            ~RV32I_EN,                  // [ 4]    :  E  : RV32E/64E base ISA
 
-                                             1'b0,                // [ 3]    :  D  : Double-precision floating-point extension
-                                             C_EXT_EN,            // [ 2]    :  C  : C Compressed extension (Zca/Zcb/Zcmp)
-                                             B_EXT_EN,            // [ 1]    :  B  : B extension (bit manipulation)
-                                             1'b0                 // [ 0]    :  A  : Atomic extension
+                                             1'b0,                      // [ 3]    :  D  : Double-precision floating-point extension
+                                             C_EXT_EN,                  // [ 2]    :  C  : C Compressed extension (Zca/Zcb/Zcmp)
+                                             B_EXT_EN,                  // [ 1]    :  B  : B extension (bit manipulation)
+                                             1'b0                       // [ 0]    :  A  : Atomic extension
                                             };
 
 
@@ -166,13 +175,7 @@ assign                    ids_rdata_o    =  (mvendorid  & {32{bank_ids_en_i  & r
                                             (misa       & {32{bank_misa_en_i & register_sel_i['h1 ]}}) ;  // 0x301
 
 
-//////======================================================================================================================//////
-//////======================================================================================================================//////
-//////                                                                                                                      //////
-//////                                                   LINT CLEANUP                                                       //////
-//////                                                                                                                      //////
-//////======================================================================================================================//////
-//////======================================================================================================================//////
+// Lint: tie off unused register_sel_i bits.
 
 wire [63:22] register_sel_63_22_unused = register_sel_i[63:22];
 wire [16: 2] register_sel_16__2_unused = register_sel_i[16: 2];

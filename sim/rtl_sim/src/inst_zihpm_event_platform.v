@@ -18,8 +18,8 @@
 //   ~30-iteration delay loop, then inhibits and reads the counter.
 //   Expected result: each platform counter == 4.
 //
-//   Note: hpm_platform_events_i is not connected in the testbench harness;
-//   this file uses force/release to drive it.
+//   hpm_platform_events_i is driven through the harness reg `hpm_platform_events`,
+//   so this test needs no force/release on the DUT.
 //----------------------------------------------------------------------------
 
 integer ii;
@@ -31,7 +31,7 @@ integer allow_peripheral_accesses;
 reg [31:0] plat_count;
 reg [31:0] plat_sync_vals [0:7];
 
-`define SPAD(byte_off) (byte_off/4)
+`define SPAD(byte_off) ((byte_off)/4)
 
 initial
    begin
@@ -50,7 +50,7 @@ initial
       random_irq_enable = 0;
 
       // Force platform events to 0 initially (port may be unconnected / X)
-      force dut.hpm_platform_events_i = 8'h00;
+      hpm_platform_events = 8'h00;
 
       // Initialize sync value lookup table
       plat_sync_vals[0] = 32'h11111111;
@@ -81,9 +81,9 @@ initial
                   ii, ii, $time);
 
          // Assert platform event bit ii for exactly 4 clock cycles
-         force dut.hpm_platform_events_i = (8'h01 << ii);
+         hpm_platform_events = (8'h01 << ii);
          repeat(4) @(posedge free_clk);
-         force dut.hpm_platform_events_i = 8'h00;
+         hpm_platform_events = 8'h00;
 
          // Firmware delay loop is ~30 iterations — no need to wait here;
          // it will inhibit and write to scratchpad before asserting next sync.
@@ -96,13 +96,24 @@ initial
       wait(probes_cpu.x31==32'hdeadbeef);
       repeat(3) @(posedge free_clk);
 
-      // Release force on platform events
-      release dut.hpm_platform_events_i;
+      hpm_platform_events = 8'h00;
 
       //=================================================================
       // Check all 8 platform event counter results
       // Scratchpad word index == event index (0x00 -> word 0, 0x04 -> word 1, ...)
       //=================================================================
+      if (ZIHPM_NR == 0) begin : absent_hpm
+         repeat(40) @(posedge free_clk);
+         $display("");
+         $display("ZIHPM_NR = 0: mhpmcounter3 / mhpmevent3 absent, every access illegal (mcause 2)");
+         check_mem_value(`SPAD(32'h60), 32'd3);           // initial probe: 3 traps
+         check_mem_value(`SPAD(32'h64), 32'hA5A5A5A5);    // rd untouched
+         for (ii = 0; ii < 8; ii = ii + 1) begin
+            check_mem_value(ii, 32'd2);                    // 2 traps after pulse i
+            check_mem_value(`SPAD(32'h40) + ii, 32'hA5A5A5A5);
+         end
+         check_mem_value(`SPAD(32'h68), 32'd0);           // no cause other than 2
+      end else begin
       $display("");
       $display("Platform event counter results:");
       for (ii = 0; ii < 8; ii = ii + 1) begin
@@ -115,6 +126,7 @@ initial
                      ii, 8'h0B + ii, plat_count, $time);
             error = error + 1;
          end
+      end
       end
 
       $display("");

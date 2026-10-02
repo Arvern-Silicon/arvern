@@ -14,7 +14,7 @@
 //   sleep: allow_deep_sleep=1 lets the master oscillator actually pause
 //   when all hclk_en advisories drop during WFI. The always-on LF MTIP
 //   fires when mtime crosses mtimecmp, aclint_mtimer_wake_lf
-//   asynchronously restarts the main osc via u_free_osc.wake_i AND
+//   asynchronously restarts the main osc via u_free_osc_ctrl.wake_i AND
 //   un-gates hclk via the dut wake aggregator, the hclk_aon-clocked
 //   MTIP synchronizer propagates the level, and the CPU wakes and takes
 //   the trap.
@@ -32,14 +32,14 @@ integer allow_peripheral_accesses;
 // oscillator's en_q goes low (i.e. the main osc actually paused while
 // the CPU was in WFI). Checked at the end of the test.
 reg     osc_gated_seen = 1'b0;
-always @(u_free_osc.en_q)
-  if ((u_free_osc.en_q === 1'b0) && !osc_gated_seen)
+always @(hclk_aon_en)
+  if ((hclk_aon_en === 1'b0) && !osc_gated_seen)
     begin
-       $display("INFO:  Main osc entered deep sleep (u_free_osc.en_q -> 0) %t ns", $time);
+       $display("INFO:  Main osc entered deep sleep (hclk_aon_en -> 0) %t ns", $time);
        osc_gated_seen = 1'b1;
     end
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin

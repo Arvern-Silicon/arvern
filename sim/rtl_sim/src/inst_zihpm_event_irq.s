@@ -28,6 +28,8 @@
 #   handler); firmware polls it to know when 4 IRQs have been taken.
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -37,6 +39,13 @@
 
 
 main:
+    # Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+    # resets to 0 -- boot code must set mnstatus.NMIE=1
+    # before any ordinary interrupt can be delivered (_random_irq_init below
+    # enables mstatus.MIE). Smrnmi is unconditional. csr 0x744 does not exist
+    # and would trap.
+    csrsi 0x744, 8                   # mnstatus.NMIE = 1
+
     jal  t0, _random_irq_init        # set up trap handler, enable MIE+MSIE
 
     li   sp, 0x80010000

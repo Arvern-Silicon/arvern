@@ -21,7 +21,7 @@
 
 `define VERY_LONG_TIMEOUT
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 integer ii;
 integer jj;

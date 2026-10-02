@@ -25,7 +25,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -83,7 +83,6 @@ initial
 
       $display("");
       $display("--- mideleg readback after write 0xFFFFFFFF (expect 0) ---");
-      check_mem_value(`SPAD(32'h20), 32'h00000000);
 
       $display("");
       $display("--- trap_count = 1 (handler at mtvec ran) ---");

@@ -9,18 +9,18 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Full license text is available in the LICENSE file at the repository root.
 //----------------------------------------------------------------------------
-// Description: marv_ctl[4] (wfi_clkgate_dis) disables WFI clock-gating.
+// Description: marv_ctl[3] (wfi_clkgate_dis) disables WFI clock-gating.
 //
-//   With marv_ctl[4]=1, the core must NOT gate its clock during WFI sleep
+//   With marv_ctl[3]=1, the core must NOT gate its clock during WFI sleep
 //   (dut_hclk_en stays 1), yet WFI must still stall and then wake on an
-//   enabled interrupt. The firmware sets marv_ctl[4] + mie.MTIE (MIE=0) and
+//   enabled interrupt. The firmware sets marv_ctl[3] + mie.MTIE (MIE=0) and
 //   WFIs; this TB checks the clock stays on during the stall, then asserts
 //   irq_m_timer to wake the core and confirms it resumes past WFI.
 //----------------------------------------------------------------------------
 
 `define VERY_LONG_TIMEOUT
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 integer ii;
 integer jj;
@@ -48,25 +48,25 @@ initial
 
       $display("");
       $display(" ====================================================================");
-      $display("|     marv_ctl[4] = disable WFI clock-gating (stall, never gate)     |");
+      $display("|     marv_ctl[3] = disable WFI clock-gating (stall, never gate)     |");
       $display(" ====================================================================");
       $display("");
-      $display("Waiting for the firmware to set marv_ctl[4] and enter WFI...");
+      $display("Waiting for the firmware to set marv_ctl[3] and enter WFI...");
 
       @(probes_cpu.x31==32'h21212121);
 
-      // Confirm marv_ctl[4] latched.
+      // Confirm marv_ctl[3] latched.
       repeat(5) @(posedge free_clk);
       $display("");
-      $display("--- marv_ctl[4] armed check ---");
+      $display("--- marv_ctl[3] armed check ---");
       begin : check_armed
          reg [31:0] mctl_val;
          mctl_val = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h04)];
-         if (mctl_val[4] !== 1'b1) begin
-            $display("ERROR: marv_ctl[4] not set after write -- marv_ctl=0x%h %t ns", mctl_val, $time);
+         if (mctl_val[3] !== 1'b1) begin
+            $display("ERROR: marv_ctl[3] not set after write -- marv_ctl=0x%h %t ns", mctl_val, $time);
             error = error + 1;
          end else begin
-            $display("PASS:  marv_ctl[4] set -- marv_ctl=0x%h %t ns", mctl_val, $time);
+            $display("PASS:  marv_ctl[3] set -- marv_ctl=0x%h %t ns", mctl_val, $time);
          end
       end
 
@@ -76,11 +76,11 @@ initial
       $display("");
       $display("--- WFI sleep with clock-gating disabled ---");
       if (dut_hclk_en !== 1'b1) begin
-         $display("ERROR: dut_hclk_en=%b during WFI -- clock gated despite marv_ctl[4]=1 %t ns",
+         $display("ERROR: dut_hclk_en=%b during WFI -- clock gated despite marv_ctl[3]=1 %t ns",
                   dut_hclk_en, $time);
          error = error + 1;
       end else begin
-         $display("PASS:  dut_hclk_en=1 during WFI (clock-gating disabled by marv_ctl[4]) %t ns", $time);
+         $display("PASS:  dut_hclk_en=1 during WFI (clock-gating disabled by marv_ctl[3]) %t ns", $time);
       end
 
       // WFI must still wake: assert the machine-timer IRQ pin.

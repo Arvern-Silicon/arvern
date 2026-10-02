@@ -27,7 +27,7 @@ integer allow_peripheral_accesses;
 
 // Scratchpad word address offset (byte address / 4)
 // SRAM base is 0x80000000, word-addressed starting at 0
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -74,7 +74,6 @@ initial
             $display("PASS:  nmi_handler_addr stored by firmware: 0x%h %t ns", handler_addr, $time);
          end
 
-         nmi_vector = handler_addr;
       end
 
       // Verify scratchpad counters are zeroed before NMI fires

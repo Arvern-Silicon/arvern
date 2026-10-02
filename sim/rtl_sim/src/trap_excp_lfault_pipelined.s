@@ -53,6 +53,9 @@ main:
 
     /* Enable MIE (not strictly required for sync exceptions, but consistent
        with check_cpu_reg's -rirq gate). */
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrsi mstatus, 0x8
 
     /* Initialize SCRATCH_A with SCRATCH_VAL_A (so we can tell if T2 leaked) */

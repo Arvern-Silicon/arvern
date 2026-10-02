@@ -36,6 +36,7 @@ from pathlib import Path
 _SIM_BIN = (Path(__file__).parent / '..' / '..' / 'sim' / 'rtl_sim' / 'bin').resolve()
 sys.path.insert(0, str(_SIM_BIN))
 from rtl_sweep_configs import (generate_configs, sweepable_params, resolve_persona, PERSONAS,  # noqa: E402
+    COVERAGE_CONFIGS,
                                 print_sweep_list)
 
 
@@ -168,8 +169,10 @@ def apply_sweep_override(rtl_config, sweep_sel):
     the annotation comment.
     """
     params = sweepable_params(rtl_config)
-    persona_names = {lbl for lbl, _ in PERSONAS}
-    if sweep_sel in persona_names:
+    # COVERAGE_CONFIGS are resolvable by name like personas but are excluded
+    # from every sweep mode, so they can only be selected this way.
+    persona_names = {lbl for lbl, _ in PERSONAS} | {lbl for lbl, _ in COVERAGE_CONFIGS}
+    if sweep_sel in persona_names or sweep_sel.startswith('ofat-light:'):
         return resolve_persona(sweep_sel, params)
     # Otherwise treat as integer index into the 'all' sweep set
     try:
@@ -214,8 +217,8 @@ def main():
         '--rtl-config', metavar='N_OR_NAME',
         help='Apply a sweep config. Accepts either a 1-based integer index '
              '(e.g. 14 — same numbering as `./run_all -rtl_sweep` and '
-             '`run_lint --sweep`) or a persona name (minimal / medium / full '
-             'from bin/rtl_sweep_configs.py:PERSONAS). Use --list-configs to '
+             '`run_lint --sweep`) or a persona name (light / classic / performance / ultra, '
+             'or a -dbg twin, from bin/rtl_sweep_configs.py:PERSONAS). Use --list-configs to '
              'see the numbered set.'
     )
     parser.add_argument(

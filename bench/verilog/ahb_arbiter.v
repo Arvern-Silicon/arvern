@@ -13,6 +13,8 @@
 // Module Description : Behavioural 2-master AHB arbiter for the testbench.
 //----------------------------------------------------------------------------
 
+`include "timescale.v"
+
 module  ahb_arbiter (
 
 // AHB CLOCK & RESET

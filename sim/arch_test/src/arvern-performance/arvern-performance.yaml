@@ -1,0 +1,207 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/riscv/riscv-unified-db/main/spec/schemas/config_schema.json
+
+# Copyright (c) 2026, 10xEngineers, Harvey Mudd College and Eclipse Foundation
+# SPDX-License-Identifier: Apache-2.0 WITH SHL-2.1
+
+# UDB Architecture Configuration for the aRVern "performance" persona.
+# See rtl_sweep_configs.py:PERSONAS -- RV32IM + full B + Zca/Zcb + Zicntr.
+#
+# SU_MODE_EN=1: M + S + U. S-mode is physical -- arvern has no MMU and no satp
+# beyond a WARL stub -- so address translation is Svbare only.
+---
+$schema: config_schema.json#
+kind: architecture configuration
+type: fully configured
+name: arvern-performance
+description: aRVern "performance" persona - RV32IM + Zba/Zbb/Zbs/Zbc + Zca/Zcb + Zicntr
+implemented_extensions:
+  - { name: I, version: "= 2.1" }
+  - { name: M, version: "= 2.0" }
+  - { name: C, version: "= 2.0" }
+  - { name: Zca, version: "= 1.0.0" }
+  - { name: Zcb, version: "= 1.0.0" }
+  - { name: B, version: "= 1.0.0" }
+  - { name: Zba, version: "= 1.0.0" }
+  - { name: Zbb, version: "= 1.0.0" }
+  - { name: Zbs, version: "= 1.0.0" }
+  - { name: Zbc, version: "= 1.0.0" }
+  - { name: Zicntr, version: "= 2.0" }
+  - { name: Zicsr, version: "= 2.0" }
+  - { name: Zifencei, version: "= 2.0" }
+  - { name: Sm, version: "= 1.12.0" }
+  - { name: S, version: "= 1.12.0" }
+  - { name: U, version: "= 1.0.0" }
+  # aRVern implements ratified Ssdbltrp: sstatus.SDT (bit 24), menvcfgh.DTE
+  # (0x31A bit 27, resets to 1) and mtval2 (0x34B). Declared because it is true of
+  # the DUT, but be aware THE REFERENCE MODEL CANNOT HONOUR IT: sail_riscv 0.13.1
+  # has no Ssdbltrp in its config schema (its Ss* set is Ssccptr / Sscofpmf /
+  # Sscounterenw / Ssnpm / Ssqosid / Ssstateen / Sstc / Sstvala, and there is no
+  # dte/dbltrp field at all -- Smdbltrp and Smrnmi are missing too). So the model
+  # has no menvcfg.DTE bit and reads it back as 0, which is why Sm_mcsr-00's
+  # menvcfgh_csrrw1 coverpoint cannot pass. Adding this line changed nothing; it
+  # is kept because it is accurate and becomes effective on a Sail that supports
+  # the extension. Do NOT "fix" it by changing aRVern's DTE reset.
+  - { name: Ssdbltrp, version: "= 1.0.0" }
+
+params:
+  # XLEN parameters (VERIFIED)
+  MXLEN: 32
+  PHYS_ADDR_WIDTH: 32
+
+  # MISA (VERIFIED -- arv_csr_ids.v: misa is a pure `assign` from parameters,
+  # there is no write path, so every extension bit is read-only)
+  MUTABLE_MISA_M: false
+  MUTABLE_MISA_C: false
+  MUTABLE_MISA_B: false
+  MISA_CSR_IMPLEMENTED: true
+  TIME_CSR_IMPLEMENTED: true
+
+  # endianness (VERIFIED)
+  M_MODE_ENDIANNESS: little
+
+  # trap/exception behavior (VERIFIED)
+  TRAP_ON_ECALL_FROM_M: true
+  TRAP_ON_EBREAK: true
+  TRAP_ON_UNIMPLEMENTED_INSTRUCTION: true
+  TRAP_ON_RESERVED_INSTRUCTION: true
+  # VERIFIED -- non-existent CSRs inside an implemented bank read 0 / ignore
+  # writes rather than trapping (see CLAUDE.md "Spec Compliance Notes")
+  TRAP_ON_UNIMPLEMENTED_CSR: false
+  TRAP_ON_ILLEGAL_WLRL: false
+
+  # MTVAL reporting (VERIFIED against doc/traps_and_interrupts.md section 2,
+  # "mtval is sampled at trap entry":
+  #   causes 0/4/6 -> faulting misaligned address
+  #   causes 1/5/7 -> faulting access-fault address
+  #   cause  2     -> 0 (spec-legal; handlers re-fetch the encoding from mepc)
+  #   cause  3     -> 0
+  # NB the misaligned entries differ from the cv32e20 reference this config was
+  # seeded from: that core resolves misaligned accesses in hardware and never
+  # reports them, whereas arvern traps (arv_load_store.v:265).
+  REPORT_VA_IN_MTVAL_ON_BREAKPOINT: false
+  REPORT_VA_IN_MTVAL_ON_LOAD_MISALIGNED: true
+  REPORT_VA_IN_MTVAL_ON_STORE_AMO_MISALIGNED: true
+  REPORT_VA_IN_MTVAL_ON_INSTRUCTION_MISALIGNED: true
+  REPORT_VA_IN_MTVAL_ON_LOAD_ACCESS_FAULT: true
+  REPORT_VA_IN_MTVAL_ON_STORE_AMO_ACCESS_FAULT: true
+  REPORT_VA_IN_MTVAL_ON_INSTRUCTION_ACCESS_FAULT: true
+  REPORT_ENCODING_IN_MTVAL_ON_ILLEGAL_INSTRUCTION: false
+  MTVAL_WIDTH: 32
+
+  # Misaligned load/store support (VERIFIED -- arv_load_store.v:265-270 raises
+  # load/store address-misaligned; the access is suppressed, never split)
+  MISALIGNED_LDST: false
+  # A misaligned access into a PMP-denied region reports the access fault
+  # (5/7), not the misalignment (4/6): the checker outranks the alignment
+  # check. Priv 3.1.15 leaves this to the implementation; the sail reference
+  # makes the same choice (upstream configs declare `low`).
+  MISALIGNED_LDST_EXCEPTION_PRIORITY: low
+
+  # CSR / implementation IDs (VERIFIED -- arv_csr_ids.v)
+  ARCH_ID_VALUE: 0x36 # marchid = 54, allocated to aRVern by RISC-V International
+  # mvendorid = 0x000008FB = (bank 17 << 7) | 0x7B  (JEDEC JEP106 bank 18)
+  VENDOR_ID_BANK: 0x11
+  VENDOR_ID_OFFSET: 0x7B
+  # mimpid is a pure version register: {major, minor, patch} in [31:8], [7:0]
+  # reserved zero (arv_csr_ids.v). RTL_VERSION = 24'h010000 -> v1.0.0. The build
+  # configuration is NOT here -- it lives in marv_cfg (0xFFF), a custom CSR the
+  # suite does not read. Same value for every persona; bump it when RTL_VERSION
+  # moves, or Sm_mcsr-00 fails.
+  IMP_ID_VALUE: 0x01000000
+
+  # MTVEC (VERIFIED -- arv_csr_traps.v:920 stores {1'b0, wdata[0]}, so MODE is
+  # WARL-narrowed to Direct/Vectored and a write of 2 or 3 lands as 0 or 1)
+  MTVEC_MODES: [0, 1]
+  MTVEC_ACCESS: rw
+  MTVEC_ILLEGAL_WRITE_BEHAVIOR: custom
+  MTVEC_BASE_ALIGNMENT_VECTORED: 4
+  MTVEC_BASE_ALIGNMENT_DIRECT: 4
+
+  # Sm params (VERIFIED)
+  PRECISE_SYNCHRONOUS_EXCEPTIONS: true # in-order pipeline, no imprecise exception path
+  MARCHID_IMPLEMENTED: true # arv_csr_ids.v:85 -- fixed 0x36
+  MIMPID_IMPLEMENTED: true # arv_csr_ids.v -- non-zero, carries the RTL version
+  PMA_GRANULARITY: 2 # no PMA hardware; 32-bit AHB data bus => 4-byte natural granule
+
+  # CONFIG PTR (VERIFIED)
+  CONFIG_PTR_ADDRESS: 0x0 # arv_csr_ids.v:91 -- mconfigptr tied 0
+
+  # HPM (VERIFIED)
+  # ZIHPM_NR=0 in this persona -- no mhpmcounter3-31 at all
+  HPM_COUNTER_EN: [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+  MCOUNTINHIBIT_IMPLEMENTED: true
+  # mcountinhibit is 3 bits (arv_csr_cntr.v): CY and IR inhibitable, TM RO-0
+  COUNTINHIBIT_EN: [true, false, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+  # PMP: sixteen entries exist architecturally, of which PMP_NR are writable and
+  # the rest are read-only zero (Priv 3.7.1). The arch-test build elaborates all
+  # 16 (ACT_PMP_NR in bin/run_act) -- the shipping persona uses 4.
+  # G=0, so the granularity is 4 bytes (log2) and all four A encodings are legal.
+  NUM_PMP_ENTRIES: 16
+  NUM_USABLE_PMP_ENTRIES: 16
+  PMP_GRANULARITY: 2
+  PMP_TOR_SUPPORTED: true
+  PMP_NA4_SUPPORTED: true
+  PMP_NAPOT_SUPPORTED: true
+  # U-mode is present, so mcounteren gates CY/TM/IR (3-bit register)
+  MCOUNTENABLE_EN: [true, true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+
+  # ---------------------------------------------------------------------------
+  # S / U mode (SU_MODE_EN=1). S-mode is physical: arvern has no MMU and satp is
+  # a WARL stub, so Bare is the only translation mode.
+  # ---------------------------------------------------------------------------
+  SXLEN: [32]  # list, not scalar -- unlike MXLEN (upstream configs note the oddity)
+  UXLEN: [32]
+  S_MODE_ENDIANNESS: little
+  U_MODE_ENDIANNESS: little
+
+  # misa is a pure `assign` from parameters -- no write path (arv_csr_ids.v)
+  MUTABLE_MISA_S: false
+  MUTABLE_MISA_U: false
+
+  # No address translation: Bare only, and no ASID field to speak of.
+  SATP_MODE_BARE: true
+  ASID_WIDTH: 0
+  # sfence.vma raises illegal-instruction in every config -- aRVern implements no
+  # address translation at all (see CLAUDE.md "Spec Compliance Notes").
+  TRAP_ON_SFENCE_VMA_WHEN_SATP_MODE_IS_READ_ONLY: true
+
+  TRAP_ON_ECALL_FROM_S: true
+  TRAP_ON_ECALL_FROM_U: true
+
+  # No F/D/V, so mstatus.FS and mstatus.VS are read-only zero.
+  MSTATUS_FS_LEGAL_VALUES: [0]
+  MSTATUS_VS_LEGAL_VALUES: [0]
+
+  # stvec MODE is WARL-narrowed exactly like mtvec (arv_csr_traps.v:687 stores
+  # {1'b0, wdata[0]}), so Direct and Vectored are both reachable.
+  STVEC_MODES: [0, 1]
+  STVAL_WIDTH: 32
+
+  # stval is written from the same latched value as mtval (arv_csr_traps.v:1016
+  # stval_stval_nxt <= mtval_save_latched), so these mirror the MTVAL block
+  # above. Page-fault causes cannot arise without an MMU.
+  REPORT_VA_IN_STVAL_ON_INSTRUCTION_MISALIGNED: true
+  REPORT_VA_IN_STVAL_ON_INSTRUCTION_ACCESS_FAULT: true
+  REPORT_VA_IN_STVAL_ON_LOAD_MISALIGNED: true
+  REPORT_VA_IN_STVAL_ON_LOAD_ACCESS_FAULT: true
+  REPORT_VA_IN_STVAL_ON_STORE_AMO_MISALIGNED: true
+  REPORT_VA_IN_STVAL_ON_STORE_AMO_ACCESS_FAULT: true
+  REPORT_VA_IN_STVAL_ON_INSTRUCTION_PAGE_FAULT: false
+  REPORT_VA_IN_STVAL_ON_LOAD_PAGE_FAULT: false
+  REPORT_VA_IN_STVAL_ON_STORE_AMO_PAGE_FAULT: false
+
+  # scounteren is an 11-bit register (arv_csr_traps.v:207) but this persona has
+  # ZIHPM_NR=0, so only CY/TM/IR gate anything.
+  SCOUNTENABLE_EN: [true, true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+
+  # Remaining S/U-gated requirements. stval mirrors mtval throughout: cause 3
+  # writes 0, illegal-instruction writes 0 (handlers re-fetch from sepc), and
+  # page faults cannot arise without an MMU.
+  REPORT_VA_IN_STVAL_ON_BREAKPOINT: false
+  REPORT_ENCODING_IN_STVAL_ON_ILLEGAL_INSTRUCTION: false
+  REPORT_VA_IN_MTVAL_ON_INSTRUCTION_PAGE_FAULT: false
+  REPORT_VA_IN_MTVAL_ON_LOAD_PAGE_FAULT: false
+  REPORT_VA_IN_MTVAL_ON_STORE_AMO_PAGE_FAULT: false
+
+  # stvec stores [31:2] verbatim in both modes, same as mtvec -- 4-byte aligned.
+  STVEC_BASE_ALIGNMENT_VECTORED: 4

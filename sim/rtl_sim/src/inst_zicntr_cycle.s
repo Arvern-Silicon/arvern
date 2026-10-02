@@ -167,6 +167,9 @@ _start:
 
     # Enable global interrupts (MIE = bit 3 of mstatus)
     li   t0, 8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs MSTATUS, t0
 
     # Sample mcycle before WFI

@@ -12,6 +12,11 @@
 // Description: TRAP S NESTED EXCP (IRQ then EXCP)
 //   Reproducer for RTL review #7 -- delegation of nested exception inside an
 //   S-mode IRQ handler.
+//
+//   Ssdbltrp update: the S-IRQ handler now clears sstatus.SDT after its state
+//   save (spec re-entrancy contract) so the nested illegal still delegates
+//   horizontally to S. Also checks sstatus.SDT (bit 24) was set by hardware
+//   on the S-mode INTERRUPT entry (snapshot at scratchpad 0x24).
 //----------------------------------------------------------------------------
 
 `define LONG_TIMEOUT
@@ -22,7 +27,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -65,6 +70,16 @@ initial
       $display("--- Nested exception must have been delegated to S-mode ---");
       check_mem_value(`SPAD(32'h10), 32'h00000001);   // s_trap_count_excp
       check_mem_value(`SPAD(32'h14), 32'h00000002);   // SCAUSE == 2 (illegal)
+
+      $display("--- Ssdbltrp: HW set sstatus.SDT on S-mode IRQ entry ---");
+      if (ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h24)][24] !== 1'b1) begin
+         $display("ERROR: sstatus.SDT mismatch at S-IRQ handler entry -- expected: 1 / actual: %b %t ns",
+                  ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h24)][24], $time);
+         $display("       Hardware must set SDT on EVERY trap taken into S-mode (interrupts included)");
+         error = error + 1;
+      end else begin
+         $display("PASS:  sstatus.SDT = 1 at S-IRQ handler entry (HW set it on interrupt entry) %t ns", $time);
+      end
 
       $display("--- No M-mode trap must have been taken ---");
       check_mem_value(`SPAD(32'h00), 32'h00000000);   // m_trap_count

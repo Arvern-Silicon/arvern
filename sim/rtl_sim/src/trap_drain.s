@@ -21,6 +21,8 @@
 #   the trap is properly recorded.
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -178,6 +180,11 @@ handler_done:
     la   t0, trap_handler
     csrw mtvec, t0
 
+    # Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+    # resets to 0, so boot code must set mnstatus.NMIE=1 before any
+    # ordinary interrupt can be delivered. Smrnmi is unconditional.
+    csrsi 0x744, 8              # mnstatus.NMIE = 1
+
     # Initialize callee-saved registers to known pattern
     li   s2, 0xAAAAAAAA
     li   s3, 0xBBBBBBBB
@@ -216,6 +223,9 @@ handler_done:
 
     # Re-enable MSTATUS.MIE and immediately start divide
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
     div  s7, t2, t3            # s7 = 1000000 / 1000 = 1000
 

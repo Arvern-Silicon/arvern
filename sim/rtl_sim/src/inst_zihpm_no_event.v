@@ -25,7 +25,7 @@ reg [31:0] p1_disabled_count;
 reg [31:0] p2_reserved13_count;
 reg [31:0] p3_reserved1f_count;
 
-`define SPAD(byte_off) (byte_off/4)
+`define SPAD(byte_off) ((byte_off)/4)
 
 initial
    begin

@@ -51,7 +51,7 @@ reg [31:0] s_delta;
 reg [31:0] s_hpm3;
 reg [31:0] s_hpm3h;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin

@@ -9,8 +9,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Full license text is available in the LICENSE file at the repository root.
 //----------------------------------------------------------------------------
-// Description: ACCEPTED-DEVIATION LOCK
-//   NMI PREEMPTS AN IN-FLIGHT POSTED STORE -> FAULT DROPPED
+// Description: NMI PREEMPTS AN IN-FLIGHT POSTED STORE -> FAULT STILL REPORTED
+//   A pin NMI preempting the store does not lose its fault: the error
+//   sets a sticky nmi_bus_pending, so it is delivered as a second RNMI after
+//   the pin one. Two deliveries, in source order: mncause 2 then 3.
+//   The store is still not replayed -- mnepc stays strictly past its PC.
 //----------------------------------------------------------------------------
 
 `define LONG_TIMEOUT
@@ -23,7 +26,7 @@ integer allow_peripheral_accesses;
 
 // Scratchpad word address offset (byte address / 4)
 // SRAM base is 0x80000000, word-addressed starting at 0
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 reg [31:0] store_fault_pc;
 
@@ -56,7 +59,11 @@ initial
       $display("");
       $display("Waiting for the firmware (pre-store sentinel)...");
 
-      @(probes_cpu.x31==32'h11111111);
+      // `wait`, not `@`: the firmware reaches this sentinel during the peripheral-reset
+      // sequence above, so by the time this line runs x31 may ALREADY hold the value.
+      // `@(expr)` waits for an event on expr and would then block forever, which is
+      // exactly what happened when the testbench arrived after the firmware.
+      wait (probes_cpu.x31==32'h11111111);
 
       begin : setup_nmi_vector
          reg [31:0] handler_addr;
@@ -75,14 +82,15 @@ initial
             error = error + 1;
          end
 
-         nmi_vector = handler_addr;
       end
 
-      // NOTE: do NOT issue any clock-consuming task (check_mem_value,
-      // @(posedge), repeat) between here and the wait() below -- the
-      // faulting store is the very next instruction after the sentinel,
-      // so any consumed cycle misses the PC window and the level-
-      // sensitive wait() would block forever.
+      // Armed: release the firmware, which is spinning on this slot. Until this
+      // write it cannot reach the faulting store, so the PC window below cannot be
+      // missed however the simulator schedules us. Before the handshake the store
+      // was the very next instruction after the sentinel and a single cycle of
+      // testbench latency lost the window -- which is what made this test pass on
+      // Icarus and hang on Verilator.
+      ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h1C)] = 32'h1;
 
 
       //=================================================================
@@ -126,14 +134,24 @@ initial
       $display("");
       $display("Waiting for the firmware (end sentinel)...");
 
-      @(probes_cpu.x31==32'hdeadbeef);
+      wait (probes_cpu.x31==32'hdeadbeef);
       random_irq_enable = 0;
       repeat(3) @(posedge free_clk);
 
       // --- NMI actually fired exactly once (async trap serviced) ---
       $display("");
-      $display("--- NMI count (expect 1) ---");
-      check_mem_value(`SPAD(32'h00), 32'h00000001);
+      $display("--- mncause of each RNMI delivered (2 = pin, 3 = data-bus error) ---");
+      $display("     #1 = 0x%h   #2 = 0x%h",
+               ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h20)],
+               ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h24)]);
+
+      $display("--- two RNMIs: the pin, then the preempted store's bus error ---");
+      check_mem_value(`SPAD(32'h00), 32'h00000002);
+      check_mem_value(`SPAD(32'h20), 32'h80000002);   // #1 pin
+      check_mem_value(`SPAD(32'h24), 32'h80000003);   // #2 data-bus error
+
+      // mncause is latched at nmi_detect, not sampled at trap_taken: the pin
+      // can deassert in the cycle between, which reported a pin NMI as cause 3.
 
       // --- DEVIATION-LOCK MNEPC CHECK (contract-derived, bug-sensitive) ---
       // The store is posted/committed and NOT replayed by MNRET, so the
@@ -165,10 +183,10 @@ initial
          end
       end
 
-      // --- THE DEVIATION: the store-access-fault was NEVER reported ---
-      // (spec-strict would be exc_count==1, mcause==7, mepc==store PC)
+      // The fault is reported through the RNMI, never through mtvec:
+      // mcause 5/7 are RESERVED.
       $display("");
-      $display("--- Exception count (expect 0: fault DROPPED) ---");
+      $display("--- no synchronous exception: mtvec is never entered ---");
       check_mem_value(`SPAD(32'h04), 32'h00000000);
 
       $display("");

@@ -14,8 +14,12 @@
 //   term at arv_csr_traps.v:2120. PROBE A (store inside the RNMI handler,
 //   NMIE=0, MPRV=1/MPP=U) MUST be tagged M-mode on AHB per RISC-V Privileged
 //   spec §8.3. RTL lacking the NMIE gate tags it U-mode ⇒ this test FAILS
-//   without the gate and PASSES with it. PROBE B (post-mnret, NMIE=1)
-//   confirms MPRV resumes normally (U-mode).
+//   without the gate and PASSES with it. PROBE B (post-mnret): the handler
+//   sets mnstatus.MNPP=U, and per the ratified Smrnmi spec "If MNRET changes
+//   the privilege mode to a mode less privileged than M, it also sets
+//   mstatus.MPRV to 0" — so after the mnret-to-U (observed from M via
+//   ecall-from-U) mstatus.MPRV must read 0 and the M-mode probe store must
+//   be M-tagged (HPROT[1]=1).
 //----------------------------------------------------------------------------
 
 `define LONG_TIMEOUT
@@ -26,7 +30,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 //=========================================================================
 // AHB HPROT/HSMODE capture: data-bus store address phase to the two probes.
@@ -82,7 +86,6 @@ initial
             $display("ERROR: nmi_handler addr in scratchpad is 0 %t ns", $time);
             error = error + 1;
          end
-         nmi_vector = handler_addr;
       end
 
       repeat(5) @(posedge free_clk);
@@ -154,18 +157,33 @@ initial
          $display("PASS:  PROBE A HPROT[1]=1, HSMODE=0 -- RNMI handler store M-tagged (§8.3 honored) %t ns", $time);
       end
 
-      // --- PROBE B: MPRV resumes normally after mnret (NMIE=1) ---
+      // --- PROBE B: MNRET to a mode less privileged than M clears MPRV ---
+      // Ratified Smrnmi spec (verbatim): "If MNRET changes the privilege mode
+      // to a mode less privileged than M, it also sets mstatus.MPRV to 0."
+      // The handler set mnstatus.MNPP=U, so the mnret went M->U and MUST have
+      // cleared MPRV. The firmware then ecall'd back to M-mode where it
+      // snapshotted mstatus (0x18) and issued the probe store.
       $display("");
-      $display("--- PROBE B: post-mnret store, MPRV honored (expect HPROT[1]=0, HSMODE=0) ---");
+      $display("--- PROBE B: mstatus.MPRV (bit 17) must be 0 after mnret-to-U ---");
+      if (ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h18)][17] !== 1'b0) begin
+         $display("ERROR: mstatus.MPRV=%b after mnret-to-U (expected 0) -- MNRET to <M must set mstatus.MPRV to 0 (ratified Smrnmi) %t ns",
+                  ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h18)][17], $time);
+         error = error + 1;
+      end else begin
+         $display("PASS:  mstatus.MPRV=0 after mnret-to-U %t ns", $time);
+      end
+
+      $display("");
+      $display("--- PROBE B: post-mnret M-mode store, MPRV cleared (expect HPROT[1]=1, HSMODE=0) ---");
       if (!captured_valid_b) begin
          $display("ERROR: no AHB capture for PROBE B (0x80000104) %t ns", $time);
          error = error + 1;
-      end else if (captured_hprot_b !== 1'b0 || captured_hsmode_b !== 1'b0) begin
-         $display("ERROR: PROBE B HPROT[1]=%b (exp 0) HSMODE=%b (exp 0) -- MPRV did not resume post-mnret %t ns",
+      end else if (captured_hprot_b !== 1'b1 || captured_hsmode_b !== 1'b0) begin
+         $display("ERROR: PROBE B HPROT[1]=%b (exp 1) HSMODE=%b (exp 0) -- MPRV not cleared by mnret-to-U (ratified Smrnmi) %t ns",
                   captured_hprot_b, captured_hsmode_b, $time);
          error = error + 1;
       end else begin
-         $display("PASS:  PROBE B HPROT[1]=0, HSMODE=0 -- MPRV resumed (U-mode) after mnret %t ns", $time);
+         $display("PASS:  PROBE B HPROT[1]=1, HSMODE=0 -- MPRV cleared by mnret-to-U, store M-tagged %t ns", $time);
       end
 
       //=================================================================

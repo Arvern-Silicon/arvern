@@ -69,6 +69,9 @@
 #   0x14: SECOND trap mepc
 #=========================================================================
 
+.equ MNSTATUS,       0x744
+.equ MNCAUSE,        0x742
+
 main:
     j _start
 
@@ -77,6 +80,24 @@ main:
     # Saves first two traps' mcause/mepc/mtval, advances mepc by 4
     # (all faulting insts are 32-bit non-compressed).
     #=================================================================
+    #=================================================================
+    # RNMI HANDLER -- the load bus error lands here now, not in mtvec.
+    # Records the mtvec trap_count AT ENTRY: 0 proves the RNMI was taken
+    # BEFORE the synchronous illegal-instruction trap.
+    #=================================================================
+    .align 2
+nmi_handler:
+    li   s1, 0x80000000
+    lw   t0, 0x00(s1)
+    sw   t0, 0x2C(s1)            # mtvec trap_count when the RNMI was taken
+    lw   t0, 0x24(s1)
+    addi t0, t0, 1
+    sw   t0, 0x24(s1)
+    csrr t0, MNCAUSE
+    sw   t0, 0x28(s1)
+    lw   zero, 0x28(s1)
+    .word 0x70200073             # mnret
+
     .align 2
 trap_handler:
     addi sp, sp, -24
@@ -128,6 +149,7 @@ _trap_return:
 
 
 _start:
+    csrw mstatush, x0        # MDT resets to 1; clear it or the first trap is an Smdbltrp double trap
     li   sp, 0x8000F000           # safe SP inside SRAM
     li   s1, 0x80000000           # scratchpad base
 
@@ -138,17 +160,36 @@ _start:
     sw   t0, 0x08(s1)
     sw   t0, 0x0C(s1)
     sw   t0, 0x10(s1)
+    sw   t0, 0x24(s1)
+    sw   t0, 0x28(s1)
+    li   t0, -1
+    sw   t0, 0x2C(s1)            # sentinel: -1 = the RNMI never ran
+    li   t0, 0
     sw   t0, 0x14(s1)
 
     # Install trap handler (direct mode)
     la   t0, trap_handler
     csrw mtvec, t0
 
+    la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
+    sw   t0, 0x20(s1)
+    lw   zero, 0x20(s1)
+
     # Load address operand BEFORE the race so the LW has no EX stall
     li   t1, 0x10000000           # unmapped address → HRESP=ERROR
     li   t2, 0xDEADBEEF           # CSRW source operand (value irrelevant)
 
-    li   x31, 0x11111111          # init complete
+    li   x31, 0x11111111          # init complete; tb now programs nmi_vector
+
+    li   t0, 20
+wait_vec:
+    addi t0, t0, -1
+    bnez t0, wait_vec
+
+    csrsi MNSTATUS, 8             # mnstatus.NMIE = 1 -- REQUIRED for delivery
+
+    li   x31, 0x21212121          # NMIE armed
 
     # =================================================================
     # RACE TRIGGER (the three instructions MUST stay back-to-back)

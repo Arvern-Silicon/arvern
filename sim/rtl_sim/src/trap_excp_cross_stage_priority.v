@@ -25,7 +25,7 @@ integer allow_peripheral_accesses;
 
 // Scratchpad word address offset (byte address / 4)
 // SRAM base is 0x80000000, word-addressed starting at 0
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -58,6 +58,20 @@ initial
       $display("Waiting for the firmware...");
 
       @(probes_cpu.x31==32'h11111111);
+      repeat(3) @(posedge free_clk);
+
+      begin : program_vector
+         reg [31:0] handler_addr;
+         handler_addr = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h20)];
+         if (handler_addr == 32'h0) begin
+            $display("ERROR: nmi_handler address not published %t ns", $time);
+            error = error + 1;
+         end else begin
+            $display("PASS:  nmi_vector programmed to 0x%h %t ns", handler_addr, $time);
+         end
+      end
+
+      @(probes_cpu.x31==32'h21212121);
       repeat(3) @(posedge free_clk);
 
       // Scratchpad should be zeroed
@@ -96,21 +110,26 @@ initial
       @(probes_cpu.x31==32'h22222222);
       repeat(3) @(posedge free_clk);
 
-      // Both traps must have been taken — count should be 2.
+      // RE-DERIVED FOR ASYNCHRONOUS BUS ERRORS.
+      //
+      // The two exceptions no longer compete for one encoder slot: the LW's
+      // bus error is an RNMI and the CSRW's illegal-instruction is the only
+      // synchronous trap. So the question is no longer "which mcause wins"
+      // but "is either one LOST" -- both must be delivered exactly once.
       $display("");
-      $display("--- trap_count (expect 2) ---");
-      check_mem_value(`SPAD(32'h00), 32'h00000002);
+      $display("--- both must be delivered: 1 RNMI + 1 synchronous trap ---");
+      check_mem_value(`SPAD(32'h24), 32'h00000001);   // RNMI count
+      check_mem_value(`SPAD(32'h28), 32'h80000003);   // mncause = bus error
+      check_mem_value(`SPAD(32'h00), 32'h00000001);   // exactly one mtvec trap
+      check_mem_value(`SPAD(32'h04), 32'h00000002);   // ...and it is the illegal CSRW
 
-      // *** PRIMARY DISCRIMINATOR ***
-      // FIRST trap's mcause must be 5 (LD access fault), NOT 2 (illegal).
+      // *** PRIMARY DISCRIMINATOR (re-derived) ***
+      // The RNMI must OUTRANK the synchronous exception. The RNMI handler
+      // samples the mtvec trap_count on entry: 0 means it ran first.
+      // (-1 is the sentinel meaning the RNMI never ran at all.)
       $display("");
-      $display("--- FIRST trap mcause (expect 5 = LD acf — NOT 2 = illegal) ---");
-      check_mem_value(`SPAD(32'h04), 32'h00000005);
-
-      // SECOND trap (sanity): the retried CSRW → illegal (cause 2).
-      $display("");
-      $display("--- SECOND trap mcause (expect 2 = illegal write to RO) ---");
-      check_mem_value(`SPAD(32'h10), 32'h00000002);
+      $display("--- the RNMI must be taken BEFORE the synchronous trap ---");
+      check_mem_value(`SPAD(32'h2C), 32'h00000000);
 
 
       //=================================================================

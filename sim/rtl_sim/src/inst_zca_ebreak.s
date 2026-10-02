@@ -125,6 +125,10 @@ main:
 
     # Enable machine interrupts globally: set MIE bit (bit 3) in MSTATUS
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrsi 0x744, 8            # Smdbltrp: a trap in M-mode with NMIE=0 is an unexpected trap
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Signal to testbench: phase 1 init complete

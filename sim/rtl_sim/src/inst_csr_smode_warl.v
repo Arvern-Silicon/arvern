@@ -13,6 +13,9 @@
 //   Checks that scounteren / senvcfg / menvcfg / menvcfgh / satp are now
 //   accessible (no illegal-instruction trap), and that SIE read is masked by
 //   mideleg per Privileged spec §3.1.9.
+//
+//   menvcfgh (Ssdbltrp): only bit 27 (DTE) is writable, resets to
+//   0x08000000 (DTE=1); all other bits read 0.
 //----------------------------------------------------------------------------
 
 integer ii;
@@ -21,7 +24,13 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
+
+// A counter-enable bit for a counter that is not implemented is read-only zero,
+// the same rule arv_csr_hpm.v applies to mcounteren's HPM bits.
+localparam [7:0]  SCOUNTEREN_HPM_MASK = (ZIHPM_NR >= 8) ? 8'hFF : ((8'h01 << ZIHPM_NR) - 8'h01);
+localparam [2:0]  SCOUNTEREN_STD_MASK = (ZICNTR_EN != 0) ? 3'b111 : 3'b000;
+localparam [10:0] SCOUNTEREN_MASK     = {SCOUNTEREN_HPM_MASK, SCOUNTEREN_STD_MASK};
 
 initial
    begin
@@ -49,14 +58,25 @@ initial
       // Verify each WARL behavior
       //=================================================================
 
-      // scounteren: 11 bits writable, the 0x7E5 mid-write should latch.
-      check_mem_value(`SPAD(32'h00), 32'h000007E5);
+      // scounteren: a counter-enable bit for a counter that is not implemented
+      // is read-only zero (same rule arv_csr_hpm.v applies to mcounteren), so
+      // the 0x7E5 mid-write latches only where a counter actually exists:
+      // bits 2:0 follow Zicntr, bits 10:3 follow ZIHPM_NR.
+      check_mem_value(`SPAD(32'h00), 32'h000007E5 & {21'h0, SCOUNTEREN_MASK});
 
-      // senvcfg / menvcfg / menvcfgh / satp -- WARL hardwired zero
+      // senvcfg / menvcfg / satp -- WARL hardwired zero
       check_mem_value(`SPAD(32'h04), 32'h00000000);
       check_mem_value(`SPAD(32'h08), 32'h00000000);
-      check_mem_value(`SPAD(32'h0C), 32'h00000000);
       check_mem_value(`SPAD(32'h10), 32'h00000000);
+
+      // menvcfgh (Ssdbltrp): reset value DTE=1
+      check_mem_value(`SPAD(32'h0C), 32'h08000000);
+      // menvcfgh after write 0xFFFFFFFF: only bit 27 latches
+      check_mem_value(`SPAD(32'h20), 32'h08000000);
+      // menvcfgh after write 0: DTE writable both ways
+      check_mem_value(`SPAD(32'h24), 32'h00000000);
+      // menvcfgh after restoring DTE=1
+      check_mem_value(`SPAD(32'h28), 32'h08000000);
 
       // SIE with mideleg=0 must read 0
       check_mem_value(`SPAD(32'h14), 32'h00000000);
@@ -66,6 +86,11 @@ initial
 
       // trap_count == 0 -- none of the CSR accesses should have trapped
       check_mem_value(`SPAD(32'h1C), 32'h00000000);
+
+      // sscratch is a plain 32-bit R/W CSR: all bits must store, both ways.
+      check_mem_value(`SPAD(32'h2C), 32'hAAAAAAAA);
+      check_mem_value(`SPAD(32'h30), 32'h55555555);
+      check_mem_value(`SPAD(32'h34), 32'hFFFFFFFF);
 
 
       //=================================================================

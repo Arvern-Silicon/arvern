@@ -70,7 +70,7 @@ initial
                  suppress_clr_log_count, $time,
                  dut.arv_csr_top_inst.arv_csr_traps_inst.muldiv_kill_wait_done,
                  dut.arv_csr_top_inst.arv_csr_traps_inst.ex_alu_is_killable_i,
-                 dut.arv_csr_top_inst.arv_csr_traps_inst.trap_pending_o,
+                 dut.arv_csr_top_inst.arv_csr_traps_inst.trap_pending,
                  dut.arv_csr_top_inst.arv_csr_traps_inst.trap_taken,
                  dut.arv_csr_top_inst.arv_csr_traps_inst.trap_kill_muldiv_o,
                  dut.arv_alu_inst.muldiv_mode_en,
@@ -105,18 +105,56 @@ initial
 // is intentionally disabled (e.g. no-kill latency measurement phases).
 // Disabling resets accumulated checker state so re-enable is clean.
 // ================================================================
-integer irq_kill_checker_en;
+reg     irq_kill_checker_en;      // flag: 0/1 only
 
 // ================================================================
 // Livelock watchdog: detect when MRET repeatedly returns to the same PC.
 // The livelock pattern is: instruction at PC X is killed by IRQ → IRQ handler
 // runs → MRET returns to PC X → killed again → repeat indefinitely.
-// Trigger: the same MEPC value seen across 10 consecutive MRETs.
-// Normal code won't trigger this: WFI returns to PC+4, exception handlers
-// return to varying PCs, and healthy IRQs on a loop eventually let it advance.
+//
+// A repeated MEPC is NOT sufficient on its own. A tight loop whose slowest
+// instruction dominates its cycle count -- e.g. a CM.JT table load under random
+// SRAM wait states -- takes nearly every IRQ on that one instruction, so MEPC
+// repeats indefinitely while the loop advances perfectly normally. Counting
+// repeats alone fails such a loop at random, depending only on the seed.
+//
+// What actually distinguishes the two is whether execution ever gets PAST the
+// instruction at MEPC. So each MRET opens a window that closes at the next trap,
+// and any dispatch inside that window at a PC other than MEPC is proof of
+// forward progress and resets the count. Handler instructions cannot spoof this:
+// they dispatch after the trap, with the window already closed.
+//
+// In a true livelock the only dispatch in the window is the doomed instruction
+// at MEPC itself (or none at all), progress never registers, and the count runs
+// to the limit as before.
 // ================================================================
 reg  [31:0] livelock_last_mepc;
 integer     livelock_mret_repeat_count;
+reg         livelock_window   = 1'b0;   // between an MRET and the next trap
+reg         livelock_progress = 1'b0;   // a PC other than MEPC dispatched in that window
+
+// livelock_window and livelock_progress have this block as their only writer: a
+// variable written with both blocking and non-blocking assignments from different
+// processes is not reliably ordered by every simulator.
+always @(posedge free_clk)
+  begin
+    if (!irq_kill_checker_en) begin
+      livelock_window   <= 1'b0;
+      livelock_progress <= 1'b0;
+    end
+    else begin
+      if (dut.arv_csr_top_inst.arv_csr_traps_inst.mret_taken)
+        livelock_progress <= 1'b0;             // the window this MRET opens starts clean
+      else if (livelock_window & probes_instructions.ex_dispatch &
+               (probes_instructions.pc_id !== livelock_last_mepc))
+        livelock_progress <= 1'b1;
+
+      if (dut.arv_csr_top_inst.arv_csr_traps_inst.trap_taken)
+        livelock_window <= 1'b0;
+      else if (dut.arv_csr_top_inst.arv_csr_traps_inst.mret_taken)
+        livelock_window <= 1'b1;
+    end
+  end
 initial
   begin
     livelock_last_mepc        = 32'hffffffff;
@@ -130,7 +168,8 @@ initial
         livelock_last_mepc         = 32'hffffffff;
       end
       else if (dut.arv_csr_top_inst.arv_csr_traps_inst.mret_taken) begin
-        if ({dut.arv_csr_top_inst.arv_csr_traps_inst.mepc_mepc, 1'b0} === livelock_last_mepc)
+        if (({dut.arv_csr_top_inst.arv_csr_traps_inst.mepc_mepc, 1'b0} === livelock_last_mepc)
+            & ~livelock_progress)
           livelock_mret_repeat_count = livelock_mret_repeat_count + 1;
         else begin
           livelock_mret_repeat_count = 1;
@@ -174,10 +213,10 @@ initial
 //   - Traps where no killable operation was in flight (no kill expected)
 // ================================================================
 reg  [31:0] reexec_prev_mret_pc;
-integer     reexec_kill_seen;
-integer     reexec_was_irq;
-integer     reexec_was_killable;
-integer     reexec_was_suppress;
+reg         reexec_kill_seen;     // flag: 0/1 only
+reg         reexec_was_irq;       // flag: 0/1 only
+reg         reexec_was_killable;  // flag: 0/1 only
+reg         reexec_was_suppress;  // flag: 0/1 only
 initial
   begin
     reexec_prev_mret_pc  = 32'hFFFFFFFF;
@@ -204,12 +243,12 @@ initial
           dut.arv_csr_top_inst.arv_csr_traps_inst.trap_kill_uop_o)
         reexec_kill_seen = 1;
       if (dut.arv_csr_top_inst.arv_csr_traps_inst.mret_taken) begin
-        if (irq_kill_checker_en &
-            reexec_was_irq      &
-            reexec_was_killable &
-            ~reexec_was_suppress &
-            ({dut.arv_csr_top_inst.arv_csr_traps_inst.mepc_mepc, 1'b0} == reexec_prev_mret_pc) &
-            ~reexec_kill_seen) begin
+        if (irq_kill_checker_en  &&
+            reexec_was_irq       &&
+            reexec_was_killable  &&
+            !reexec_was_suppress &&
+            ({dut.arv_csr_top_inst.arv_csr_traps_inst.mepc_mepc, 1'b0} == reexec_prev_mret_pc) &&
+            !reexec_kill_seen) begin
           $display(" ===============================================");
           $display("|               SIMULATION FAILED               |");
           $display("|  [Re-exec] MRET to 0x%08x without kill      |",

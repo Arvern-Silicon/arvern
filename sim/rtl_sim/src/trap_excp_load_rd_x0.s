@@ -26,9 +26,21 @@
 .equ FAULT_ADDR,     0xA0000000        /* unmapped */
 .equ MISALIGN_ADDR,  0x80000001        /* SRAM_X base + 1 (lw must be 4B aligned) */
 
+.equ MNSTATUS, 0x744
+
 .section .text
 .global main
 main:
+    j    _entry
+
+    .align 2
+/* Cause 5 is an RNMI now; only x10 moves here. Cause 4 stays on mtvec. */
+nmi_handler:
+    addi x10, x10, 1
+    .word 0x70200073                  /* mnret */
+
+_entry:
+    csrw mstatush, x0        # MDT resets to 1; clear it or the first trap is an Smdbltrp double trap
     li   sp, 0x80010000
 
     /* Handler counts each cause-5 (LAF) and each cause-4 (LAM) entry */
@@ -40,7 +52,23 @@ main:
     li   x9,  0                       /* LAM counter */
     li   x8,  0xCAFEBABE              /* Will be observed if x0 ever got written (it must not) */
 
+    /* publish the RNMI handler for the testbench */
+    la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
+    li   t1, 0x80000000
+    sw   t0, 0(t1)
+    lw   zero, 0(t1)
+
     li   x31, 0xFFFFFFFF
+
+    li   t0, 20
+wait_vec:
+    addi t0, t0, -1
+    bnez t0, wait_vec
+
+    csrsi MNSTATUS, 8                 /* NMIE=1 -- cause-5 RNMIs must be delivered */
+
+    li   x31, 0xEEEEEEEE
 
     /* ===================================================================== */
     /* PHASE A: lw x0, 0(fault_addr) MUST trap with cause 5                  */

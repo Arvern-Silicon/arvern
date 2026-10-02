@@ -41,11 +41,14 @@
 .equ CAUSE_S_OFF,     0x0C      # last S-mode scause captured
 .equ MIP_POST_CLR_OFF,0x10      # MIP read-back AFTER csrc mip,(1<<1) in handler (HW-OR check)
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 main:
     /* ----- One-time setup ----- */
     li   sp, 0x80010000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, SCRATCH
     sw   zero, COUNT_M_OFF(s1)
     sw   zero, COUNT_S_OFF(s1)
@@ -58,12 +61,21 @@ main:
     la   t0, s_handler
     csrw stvec, t0
 
+    /* Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+       resets to 0 -- boot code must set mnstatus.NMIE=1
+       before any ordinary interrupt can be delivered. Smrnmi is
+       unconditional. */
+    csrsi 0x744, 8              /* mnstatus.NMIE = 1 */
+
     csrw mideleg, zero
     csrw mie,     zero
     csrw sie,     zero
 
     /* Enable MIE / SIE globally */
     li   t0, 0x8                /* mstatus.MIE */
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
     li   t0, 0x2                /* sstatus.SIE */
     csrs sstatus, t0

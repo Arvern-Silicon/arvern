@@ -22,7 +22,26 @@ module monitor_exception (
 
 integer           excp_cnt;
 
-wire              trigger = (~free_clk_i & excp_strobe_i);
+// Qualify by the hart reset: while the core is held in reset (e.g. a mid-test
+// ndmreset pulse), the decode exception outputs are don't-care combinational
+// glitches off stale fetch flops (visible under sync reset, ASYNC_RST_EN=0) that
+// never commit to a trap. They must not be counted as exceptions.
+// Under Verilator the monitor is armed once power-on reset has driven the hart
+// reset low: until then the random initial values (reset synchronizer included)
+// can present a rising trigger. (In a 4-state simulator a delayed arm would itself
+// raise the trigger 0 -> X.)
+reg               armed;
+initial begin
+`ifdef VERILATOR
+   armed = 1'b0;
+   @(negedge tb_arvern.porn_async);
+   wait (tb_arvern.dut.hresetn_i == 1'b0);
+   armed = 1'b1;
+`else
+   armed = 1'b1;
+`endif
+end
+wire              trigger = (~free_clk_i & excp_strobe_i & tb_arvern.dut.hresetn_i & armed);
 
 initial           excp_cnt = 0;
 

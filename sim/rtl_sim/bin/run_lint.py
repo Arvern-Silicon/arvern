@@ -132,7 +132,7 @@ def run_sweep(args, params):
 
 def run_plain(args):
     # Lint the AS-BUILT configuration by default: arvern.v's module-
-    # declared defaults are feature-lean (NMI_EN=0, ZICNTR_EN=0, ZIHPM_NR=0,
+    # declared defaults are feature-lean (ZICNTR_EN=0, ZIHPM_NR=0,
     # minimal B/C) and are NEVER the config runsim/synthesis build -- those
     # build run_config.json's rtl_config defaults. So apply the run_config
     # defaults as -G overrides unless --rtl-defaults asks for the bare

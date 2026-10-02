@@ -11,7 +11,7 @@
 #----------------------------------------------------------------------------
 # Description: marv_ctl[4] (wfi_clkgate_dis) -- disable WFI clock-gating.
 #
-#   The arvern feature-control CSR (custom, 0x7FF) bit [4] forces the live
+#   The arvern feature-control CSR (custom, 0x7FF) bit [3] forces the live
 #   wakeup high so hclk_en_o stays asserted: the core does NOT clock-gate
 #   during WFI sleep. WFI must still STALL and then WAKE normally on an
 #   enabled interrupt -- only the clock gating is suppressed.
@@ -55,11 +55,11 @@ _start:
     li   t0, 0x80
     csrs mie, t0
 
-    # Set marv_ctl[4] = disable WFI clock-gating (keep default bits[2:0]).
-    li   t0, 0x10
+    # Set marv_ctl[3] = disable WFI clock-gating (keep default bits[2:0]).
+    li   t0, 0x8
     csrs 0x7ff, t0
 
-    # Read back marv_ctl so the TB can confirm bit[4] latched.
+    # Read back marv_ctl so the TB can confirm bit[3] latched.
     csrr t0, 0x7ff
     sw   t0, 0x04(s1)
     lw   t0, 0x04(s1)            # load-back fence

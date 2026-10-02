@@ -13,6 +13,7 @@
 #----------------------------------------------------------------------------
 
 .section .text
+.option push
 .option norvc        # disable all compressed instructions in this section
 .global main
 
@@ -76,12 +77,13 @@ main:
     # Encoding: 100_001_rs1'[2:0]_uimm[1]_0_rd'[2:0]_00
     #           bit [6] = 0 for C.LHU (vs C.LH where bit [6] = 1)
     #-------------------------------------------------
-.option rvc          # enable compressed instructions
+.option pop          # enable compressed instructions
 
     # Test SET 1: Load halfwords from SRAM+0 using x8 as base
     c.lhu  x9,  0(x8)   # x9  = 0x0000CCDD  <--  SRAM+0 (halfword at offset 0)
     c.lhu  x10, 2(x8)   # x10 = 0x0000AABB  <--  SRAM+2 (halfword at offset 2)
 
+.option push
 .option norvc
     # Backup first set of loads to x17-x18
     addi x17, x9,  0    # Backup x9  = 0xCCDD
@@ -89,10 +91,11 @@ main:
 
     # Test SET 2: Load halfwords from SRAM+4 using x9 as base
     addi  x9, x29, 4    # x9 = SRAM base + 4
-.option rvc
+.option pop
     c.lhu  x10, 0(x9)   # x10 = 0x00003344  <--  SRAM+4 (halfword at offset 0)
     c.lhu  x11, 2(x9)   # x11 = 0x00001122  <--  SRAM+6 (halfword at offset 2)
 
+.option push
 .option norvc
     # Backup second set of loads to x19-x20
     addi x19, x10, 0    # Backup x10 = 0x3344
@@ -100,10 +103,11 @@ main:
 
     # Test SET 3: Load halfwords from SRAM+8 using x10 as base
     addi  x10, x29, 8   # x10 = SRAM base + 8
-.option rvc
+.option pop
     c.lhu  x11, 0(x10)  # x11 = 0x00007788  <--  SRAM+8  (halfword at offset 0)
     c.lhu  x12, 2(x10)  # x12 = 0x00005566  <--  SRAM+10 (halfword at offset 2)
 
+.option push
 .option norvc
     # Backup third set of loads to x21-x22
     addi x21, x11, 0    # Backup x11 = 0x7788
@@ -111,10 +115,11 @@ main:
 
     # Test SET 4: Load halfwords from SRAM+12 using x11 as base
     addi  x11, x29, 12  # x11 = SRAM base + 12
-.option rvc
+.option pop
     c.lhu  x12, 0(x11)  # x12 = 0x0000BBCC  <--  SRAM+12 (halfword at offset 0)
     c.lhu  x13, 2(x11)  # x13 = 0x000099AA  <--  SRAM+14 (halfword at offset 2)
 
+.option push
 .option norvc
     # Backup fourth set of loads to x23-x24
     addi x23, x12, 0    # Backup x12 = 0xBBCC
@@ -122,10 +127,11 @@ main:
 
     # Test SET 5: Load halfwords from SRAM+16 using x12 as base
     addi  x12, x29, 16  # x12 = SRAM base + 16
-.option rvc
+.option pop
     c.lhu  x13, 0(x12)  # x13 = 0x0000BEEF  <--  SRAM+16 (halfword at offset 0)
     c.lhu  x14, 2(x12)  # x14 = 0x0000DEAD  <--  SRAM+18 (halfword at offset 2)
 
+.option push
 .option norvc
     # Backup fifth set of loads to x25-x26
     addi x25, x13, 0    # Backup x13 = 0xBEEF
@@ -133,10 +139,11 @@ main:
 
     # Test SET 6: Load halfwords from SRAM+20 using x13 as base
     addi  x13, x29, 20  # x13 = SRAM base + 20
-.option rvc
+.option pop
     c.lhu  x14, 0(x13)  # x14 = 0x0000BABE  <--  SRAM+20 (halfword at offset 0)
     c.lhu  x15, 2(x13)  # x15 = 0x0000CAFE  <--  SRAM+22 (halfword at offset 2)
 
+.option push
 .option norvc
     # Backup sixth set of loads to x27-x28
     addi x27, x14, 0    # Backup x14 = 0xBABE
@@ -144,10 +151,11 @@ main:
 
     # Test SET 7: Load halfwords from SRAM+24 using x14 as base (final values)
     addi  x14, x29, 24  # x14 = SRAM base + 24
-.option rvc
+.option pop
     c.lhu  x15, 0(x14)  # x15 = 0x00005678  <--  SRAM+24 (halfword at offset 0)
     c.lhu  x8,  2(x14)  # x8  = 0x00001234  <--  SRAM+26 (halfword at offset 2)
 
+.option push
 .option norvc
     # Backup seventh set of loads to x1-x2
     addi x1, x15, 0     # Backup x15 = 0x5678
@@ -155,10 +163,11 @@ main:
 
     # Test SET 8: Final load from SRAM+28 using x15 as base
     addi  x15, x29, 28  # x15 = SRAM base + 28
-.option rvc
+.option pop
     c.lhu  x8,  0(x15)  # x8  = 0x00004321  <--  SRAM+28 (halfword at offset 0)
     c.lhu  x9,  2(x15)  # x9  = 0x00008765  <--  SRAM+30 (halfword at offset 2)
 
+.option push
 .option norvc
 
     #-------------------------------------------------

@@ -131,6 +131,10 @@ handler_done:
 
     # Enable MSTATUS.MIE
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrsi 0x744, 8            # Smdbltrp: a trap in M-mode with NMIE=0 is an unexpected trap
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Initialize callee-saved registers

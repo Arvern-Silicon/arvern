@@ -1,0 +1,84 @@
+#!/bin/bash
+#----------------------------------------------------------------------------
+#          _    _           Family:    aRVern System IPs
+#         / \__/ \          Script:    act_docker
+#        /   /\   \         --------------------------------------------
+#    ===/   /=========      Copyright: (c) 2026, aRVern-dev
+#      /   / RV \   \       Contact:   arvernsilicon@gmail.com
+#     /___/______\___\      GitHub:    https://github.com/Arvern-Silicon
+#
+# SPDX-License-Identifier: BSD-3-Clause
+# Full license text is available in the LICENSE file at the repository root.
+#----------------------------------------------------------------------------
+# Run an ACT4 command inside the upstream build container.
+#
+# ELF *generation* only runs on Linux: the udb Ruby gem downloads Linux-only
+# native helpers (libz3 / espresso / eqntott / must), so it cannot bootstrap on
+# macOS. Generation therefore happens here; the resulting self-checking ELFs run
+# natively in the arvern testbench and need none of this.
+#
+# Usage:
+#   ./bin/act_docker --pull            # fetch/update the upstream image
+#   ./bin/act_docker make help         # run a Makefile target in the suite
+#   ./bin/act_docker                   # interactive shell
+#----------------------------------------------------------------------------
+
+set -euo pipefail
+
+# Upstream publishes multi-arch (amd64 + arm64) images, so this runs natively on
+# Apple Silicon. The `act4` target (repo pre-baked) is not public -- `act4-build`
+# is the toolchain+sail+mise environment, and we bind-mount our pinned suite in.
+ACT_IMAGE="ghcr.io/riscv/act4-build:latest"
+
+# mise installs Ruby/uv under /home/shared, and the first `act` run does a
+# `bundle install` for the UDB gems there. A named volume keeps that state across
+# --rm runs -- without it every invocation re-installs 75 gems.
+ACT_HOME_VOLUME="arvern-act4-home"
+
+ARCH_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SUITE_DIR="${ARCH_TEST_DIR}/run/riscv-arch-test"
+GEN_DIR="${ARCH_TEST_DIR}/run/GENERATED"
+
+if [ "${1:-}" == "--pull" ]; then
+    exec docker pull "${ACT_IMAGE}"
+fi
+
+if [ ! -d "${SUITE_DIR}" ]; then
+    echo "ERROR: suite not found at ${SUITE_DIR}" >&2
+    echo "Run ./bin/fetch_suite.sh first." >&2
+    exit 1
+fi
+
+if ! docker image inspect "${ACT_IMAGE}" >/dev/null 2>&1; then
+    echo "ERROR: image ${ACT_IMAGE} not present locally." >&2
+    echo "Run ./bin/act_docker --pull first." >&2
+    exit 1
+fi
+
+# Interactive only when stdin is a TTY, so this stays usable from scripts and CI.
+# Plain string rather than an array: macOS ships bash 3.2, where expanding an
+# empty array under `set -u` is an "unbound variable" error.
+TTY_FLAGS=""
+[ -t 0 ] && TTY_FLAGS="-it"
+
+# The suite dir is disposable -- bumping the pinned SHA means deleting and
+# re-fetching it. Generated ELFs must not live inside it, so the Makefile's
+# WORKDIR (/act4/work) is bound to run/GENERATED/ instead, which survives.
+# GENERATED (generator output: ELFs, build intermediates, stamps) is kept
+# distinct from WORK (per-test simulation scratch, mirroring sim/rtl_sim/run).
+mkdir -p "${GEN_DIR}"
+
+# The image chmods /act4 and /home/shared to 777 precisely so a non-1000 uid
+# (macOS starts at 501) can write to both.
+# The DUT config is mounted read-only rather than copied into the suite, which is
+# disposable. This is the layout upstream's own Dockerfile documents:
+#   -v ./<vendor>:/act4/config/cores/<vendor>:ro
+exec docker run --rm ${TTY_FLAGS} \
+    -u "$(id -u):$(id -g)" \
+    -v "${SUITE_DIR}:/act4" \
+    -v "${ARCH_TEST_DIR}/src:/act4/config/cores/arvern:ro" \
+    -v "${GEN_DIR}:/act4/work" \
+    -v "${ACT_HOME_VOLUME}:/home/shared" \
+    -w /act4 \
+    "${ACT_IMAGE}" \
+    "${@:-bash}"

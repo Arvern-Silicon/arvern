@@ -14,6 +14,8 @@
 //                      (ROM, SRAM, peripheral models + decoder + arbiter + interconnect wiring).
 //----------------------------------------------------------------------------
 
+`include "timescale.v"
+
 module  ahb_bus_system #(
 
 // PARAMETERs
@@ -67,6 +69,7 @@ module  ahb_bus_system #(
     input  wire            [3:0] m_nx_hprot_i,
     input  wire            [2:0] m_nx_hsize_i,
     input  wire                  m_nx_hsmode_i,
+    input  wire                  m_nx_hmaster_i,
     input  wire            [1:0] m_nx_htrans_i,
     input  wire           [31:0] m_nx_hwdata_i,
     input  wire                  m_nx_hwrite_i,
@@ -138,7 +141,8 @@ module  ahb_bus_system #(
     output wire                  plic_irq_s_external_o, // S-mode external IRQ to the core (0 when PLIC_SU_MODE_EN=0)
 
 // AHB ACLINT
-    input  wire                  hclk_aon_i,              // Always-on AHB-frequency clock (free-running copy of hclk_i; drives the LF -> hclk MTIP synchronizer inside the ACLINT)
+    input  wire                  hclk_aon_i,              // Always-on AHB-frequency clock (free-running copy of hclk_i)
+    input  wire                  hclk_aon_en_i,           // Oscillator-controller enable for hclk_aon_i: deasserted synchronously one edge before it stops, asserted asynchronously on wake. Lets the ACLINT know its clock is going away.
     input  wire                  clk_lf_i,                // Low-frequency clock for MTIME (always-on)
     input  wire                  resetn_lf_i,             // Active-low async reset for the LF domain (sync-deassert)
     output wire                  aclint_irq_m_software_o, // MSIP to the core (hclk_i domain)
@@ -157,16 +161,27 @@ module  ahb_bus_system #(
 //=============================================================================
 
 // Local parameters
-localparam               ROM_ADDRW      = $clog2(ROM_SIZE)-2;     // Address width of the ROM memory instance (32b words)
-localparam               ROM_HADDRW     = $clog2(ROM_SIZE);       // Address width of the ROM AHB interface (8b words)
+localparam               ROM_ADDRW        = $clog2(ROM_SIZE)-2;     // Address width of the ROM memory instance (32b words)
+localparam               ROM_HADDRW       = $clog2(ROM_SIZE);       // Address width of the ROM AHB interface (8b words)
 
-localparam               SRAM_X_ADDRW   = $clog2(SRAM_X_SIZE)-2;  // Address width of the Executable SRAM memory instance (32b words)
-localparam               SRAM_X_HADDRW  = $clog2(SRAM_X_SIZE);    // Address width of the Executable SRAM AHB interface (8b words)
+localparam               SRAM_X_ADDRW     = $clog2(SRAM_X_SIZE)-2;  // Address width of the Executable SRAM memory instance (32b words)
+localparam               SRAM_X_HADDRW    = $clog2(SRAM_X_SIZE);    // Address width of the Executable SRAM AHB interface (8b words)
 
-localparam               SRAM_NX_ADDRW  = $clog2(SRAM_NX_SIZE)-2; // Address width of the Non-executable SRAM memory instance (32b words)
-localparam               SRAM_NX_HADDRW = $clog2(SRAM_NX_SIZE);   // Address width of the Non-executable SRAM AHB interface (8b words)
+localparam               SRAM_LO_X_SIZE   = 4096;                   // Executable SRAM at address 0. It exists so a arch-test can verify that a PMP TOR region 0 starts at 0
 
-localparam               HAUSER_W       = 1;                      // Width of the HAUSER bus (min value is 1)
+`ifdef ARV_TB_SRAM_LO_X_EN                                          // Select whether that SRAM is selectable or not (i.e. arch-test only).
+localparam               SRAM_LO_X_EN     = 1'b1;
+`else
+localparam               SRAM_LO_X_EN     = 1'b0;
+`endif
+
+localparam               SRAM_LO_X_ADDRW  = $clog2(SRAM_LO_X_SIZE)-2;
+localparam               SRAM_LO_X_HADDRW = $clog2(SRAM_LO_X_SIZE);
+
+localparam               SRAM_NX_ADDRW    = $clog2(SRAM_NX_SIZE)-2; // Address width of the Non-executable SRAM memory instance (32b words)
+localparam               SRAM_NX_HADDRW   = $clog2(SRAM_NX_SIZE);   // Address width of the Non-executable SRAM AHB interface (8b words)
+
+localparam               HAUSER_W         = 1;                      // Width of the HAUSER bus (min value is 1)
 
 // Arbiter Interface
 wire                     m_nx_grant;
@@ -176,9 +191,12 @@ wire               [1:0] m_grant;
 wire               [1:0] m_request;
 
 // Address Decoder Interface
-wire               [7:0] s_x_decoder_1hot;
+reg                      sram_x_alias_en = 1'b0;                    // Test-controlled executable-SRAM alias (see ahb_decoder.v)
+wire               [8:0] s_x_decoder_1hot_raw;
+wire               [8:0] s_x_decoder_1hot = s_x_decoder_1hot_raw & {6'h3F, SRAM_LO_X_EN, 2'b11};
 wire              [31:0] s_x_decoder_addr;
-wire               [7:0] s_decoder_1hot;
+wire               [8:0] s_decoder_1hot_raw;
+wire               [8:0] s_decoder_1hot   = s_decoder_1hot_raw   & {6'h3F, SRAM_LO_X_EN, 2'b11};
 wire              [31:0] s_decoder_addr;
 
 // AHB Subordinate Interfaces
@@ -213,6 +231,22 @@ wire               [2:0] s_sram_x_hsize;
 wire               [1:0] s_sram_x_htrans;
 wire              [31:0] s_sram_x_hwdata;
 wire                     s_sram_x_hwrite;
+
+wire              [31:0] s_sram_lo_x_hrdata;
+wire                     s_sram_lo_x_hreadyout;
+wire                     s_sram_lo_x_hresp;
+wire                     s_sram_lo_x_hsel;
+wire              [31:0] s_sram_lo_x_haddr;
+wire      [HAUSER_W-1:0] s_sram_lo_x_hauser;
+wire               [2:0] s_sram_lo_x_hburst;
+wire               [3:0] s_sram_lo_x_hmaster;
+wire                     s_sram_lo_x_hmastlock;
+wire               [3:0] s_sram_lo_x_hprot;
+wire                     s_sram_lo_x_hready;
+wire               [2:0] s_sram_lo_x_hsize;
+wire               [1:0] s_sram_lo_x_htrans;
+wire              [31:0] s_sram_lo_x_hwdata;
+wire                     s_sram_lo_x_hwrite;
 
 wire              [31:0] s_sram_nx_hrdata;
 wire                     s_sram_nx_hreadyout;
@@ -337,6 +371,19 @@ wire               [1:0] ws_s_sram_x_htrans;
 wire              [31:0] ws_s_sram_x_hwdata;
 wire                     ws_s_sram_x_hwrite;
 
+wire              [31:0] ws_s_sram_lo_x_hrdata;
+wire                     ws_s_sram_lo_x_hreadyout;
+wire                     ws_s_sram_lo_x_hresp;
+wire                     ws_s_sram_lo_x_hsel;
+wire              [31:0] ws_s_sram_lo_x_haddr;
+wire      [HAUSER_W-1:0] ws_s_sram_lo_x_hauser;
+wire               [3:0] ws_s_sram_lo_x_hprot;
+wire                     ws_s_sram_lo_x_hready;
+wire               [2:0] ws_s_sram_lo_x_hsize;
+wire               [1:0] ws_s_sram_lo_x_htrans;
+wire              [31:0] ws_s_sram_lo_x_hwdata;
+wire                     ws_s_sram_lo_x_hwrite;
+
 wire              [31:0] ws_s_sram_nx_hrdata;
 wire                     ws_s_sram_nx_hreadyout;
 wire                     ws_s_sram_nx_hresp;
@@ -412,6 +459,14 @@ wire                     sram_x_clk;
 wire              [31:0] sram_x_din;
 wire               [3:0] sram_x_wen;
 
+wire              [31:0] sram_lo_x_dout;
+wire [SRAM_LO_X_ADDRW-1:0] sram_lo_x_addr;
+wire              [29:0] sram_lo_x_addr_full;
+wire                     sram_lo_x_cen;
+wire                     sram_lo_x_clk;
+wire              [31:0] sram_lo_x_din;
+wire               [3:0] sram_lo_x_wen;
+
 // Non-executable SRAM Interface
 wire              [31:0] sram_nx_dout;
 wire [SRAM_NX_ADDRW-1:0] sram_nx_addr;
@@ -434,6 +489,11 @@ wire                     s_sram_x_hclk;
 wire                     s_sram_x_hclk_en;
 wire                     ws_s_sram_x_hclk_en;
 reg                      s_sram_x_hclk_en_latch;
+
+wire                     s_sram_lo_x_hclk;
+wire                     s_sram_lo_x_hclk_en;
+wire                     ws_s_sram_lo_x_hclk_en;
+reg                      s_sram_lo_x_hclk_en_latch;
 
 wire                     s_sram_nx_hclk;
 wire                     s_sram_nx_hclk_en;
@@ -469,10 +529,11 @@ reg                      s_aclint_hclk_en_latch;
 //=============================================================================
 `ifdef HIPERF_AHB
 
-ahb_interconnect_hiperf #(.NR_M    (1),       // Number of non-executable AHB Managers
-                          .NR_S_X  (2),       // Number of AHB Subordinates in executable space
-                          .NR_S_NX (6),       // Number of AHB Subordinates in non-executable space
-                          .HAUSER_W(HAUSER_W) // Width of the HAUSER bus (min value is 1)
+ahb_interconnect_hiperf #(.NR_M             (1),       // Number of non-executable AHB Managers
+                          .NR_S_X           (3),       // Number of AHB Subordinates in executable space
+                          .NR_S_NX          (6),       // Number of AHB Subordinates in non-executable space
+                          .M_NX_HMASTER_TAG (4'h8),    // Data port tag (data_hmaster_o) on HMASTER[3]
+                          .HAUSER_W         (HAUSER_W) // Width of the HAUSER bus (min value is 1)
                          )               ahb_interconnect_inst (
 
 // AHB CLOCK & RESET
@@ -499,6 +560,7 @@ ahb_interconnect_hiperf #(.NR_M    (1),       // Number of non-executable AHB Ma
     .m_nx_haddr_i          ( m_nx_haddr_i                              ),
     .m_nx_hauser_i         ( m_nx_hsmode_i                             ),
     .m_nx_hburst_i         ( m_nx_hburst_i                             ),
+    .m_nx_hmaster_i        ({m_nx_hmaster_i, 3'b000}                   ),
     .m_nx_hmastlock_i      ( m_nx_hmastlock_i                          ),
     .m_nx_hprot_i          ( m_nx_hprot_i                              ),
     .m_nx_hsize_i          ( m_nx_hsize_i                              ),
@@ -518,25 +580,25 @@ ahb_interconnect_hiperf #(.NR_M    (1),       // Number of non-executable AHB Ma
     .s_decoder_addr_o      ( s_decoder_addr                            ),
 
 // ADDRESS DECODER INTERFACES (FOR EXECUTABLE SUBORDINATES ONLY)
-    .s_x_decoder_1hot_i    ( s_x_decoder_1hot[1:0]                     ),
+    .s_x_decoder_1hot_i    ( s_x_decoder_1hot[2:0]                     ),
     .s_x_decoder_addr_o    ( s_x_decoder_addr                          ),
 
 // EXECUTABLE AHB SUBORDINATE INTERFACES
-    .s_x_hrdata_i          ({s_sram_x_hrdata,     s_rom_hrdata        }),
-    .s_x_hreadyout_i       ({s_sram_x_hreadyout,  s_rom_hreadyout     }),
-    .s_x_hresp_i           ({s_sram_x_hresp,      s_rom_hresp         }),
-    .s_x_haddr_o           ({s_sram_x_haddr,      s_rom_haddr         }),
-    .s_x_hauser_o          ({s_sram_x_hauser,     s_rom_hauser        }),
-    .s_x_hburst_o          ({s_sram_x_hburst,     s_rom_hburst        }),
-    .s_x_hmaster_o         ({s_sram_x_hmaster,    s_rom_hmaster       }),
-    .s_x_hmastlock_o       ({s_sram_x_hmastlock,  s_rom_hmastlock     }),
-    .s_x_hprot_o           ({s_sram_x_hprot,      s_rom_hprot         }),
-    .s_x_hready_o          ({s_sram_x_hready,     s_rom_hready        }),
-    .s_x_hsel_o            ({s_sram_x_hsel,       s_rom_hsel          }),
-    .s_x_hsize_o           ({s_sram_x_hsize,      s_rom_hsize         }),
-    .s_x_htrans_o          ({s_sram_x_htrans,     s_rom_htrans        }),
-    .s_x_hwdata_o          ({s_sram_x_hwdata,     s_rom_hwdata        }),
-    .s_x_hwrite_o          ({s_sram_x_hwrite,     s_rom_hwrite        }),
+    .s_x_hrdata_i          ({s_sram_lo_x_hrdata,     s_sram_x_hrdata,     s_rom_hrdata        }),
+    .s_x_hreadyout_i       ({s_sram_lo_x_hreadyout,  s_sram_x_hreadyout,  s_rom_hreadyout     }),
+    .s_x_hresp_i           ({s_sram_lo_x_hresp,      s_sram_x_hresp,      s_rom_hresp         }),
+    .s_x_haddr_o           ({s_sram_lo_x_haddr,      s_sram_x_haddr,      s_rom_haddr         }),
+    .s_x_hauser_o          ({s_sram_lo_x_hauser,     s_sram_x_hauser,     s_rom_hauser        }),
+    .s_x_hburst_o          ({s_sram_lo_x_hburst,     s_sram_x_hburst,     s_rom_hburst        }),
+    .s_x_hmaster_o         ({s_sram_lo_x_hmaster,    s_sram_x_hmaster,    s_rom_hmaster       }),
+    .s_x_hmastlock_o       ({s_sram_lo_x_hmastlock,  s_sram_x_hmastlock,  s_rom_hmastlock     }),
+    .s_x_hprot_o           ({s_sram_lo_x_hprot,      s_sram_x_hprot,      s_rom_hprot         }),
+    .s_x_hready_o          ({s_sram_lo_x_hready,     s_sram_x_hready,     s_rom_hready        }),
+    .s_x_hsel_o            ({s_sram_lo_x_hsel,       s_sram_x_hsel,       s_rom_hsel          }),
+    .s_x_hsize_o           ({s_sram_lo_x_hsize,      s_sram_x_hsize,      s_rom_hsize         }),
+    .s_x_htrans_o          ({s_sram_lo_x_htrans,     s_sram_x_htrans,     s_rom_htrans        }),
+    .s_x_hwdata_o          ({s_sram_lo_x_hwdata,     s_sram_x_hwdata,     s_rom_hwdata        }),
+    .s_x_hwrite_o          ({s_sram_lo_x_hwrite,     s_sram_x_hwrite,     s_rom_hwrite        }),
 
 // NON-EXECUTABLE AHB SUBORDINATE INTERFACES
     .s_nx_hrdata_i         ({s_aclint_hrdata,     s_plic_hrdata,       s_periph2_hrdata,    s_periph1_hrdata,    s_periph0_hrdata,    s_sram_nx_hrdata    }),
@@ -563,12 +625,13 @@ ahb_interconnect_hiperf #(.NR_M    (1),       // Number of non-executable AHB Ma
 //=============================================================================
 `elsif FUSED_AHB
 
-ahb_interconnect_fused #(.NR_M         (1),        // Number of non-executable AHB Managers
-                         .NR_S_X_ROM   (1),        // Number of fused ROM controllers
-                         .NR_S_X_SRAM  (1),        // Number of fused SRAM controllers
-                         .NR_S_NX      (6),        // Number of AHB Subordinates in non-executable space
-                         .HAUSER_W     (HAUSER_W), // Width of the HAUSER bus (min value is 1)
-                         .FIXED_B_PRIO (1'b1)      // 1'b1 = Fixed priority arbitration, 1'b0 = Round-robin arbitration
+ahb_interconnect_fused #(.NR_M             (1),        // Number of non-executable AHB Managers
+                         .NR_S_X_ROM       (1),        // Number of fused ROM controllers
+                         .NR_S_X_SRAM      (2),        // Number of fused SRAM controllers
+                         .NR_S_NX          (6),        // Number of AHB Subordinates in non-executable space
+                         .M_NX_HMASTER_TAG (4'h8),     // Data port tag (data_hmaster_o) on HMASTER[3]
+                         .HAUSER_W         (HAUSER_W), // Width of the HAUSER bus (min value is 1)
+                         .FIXED_B_PRIO     (1'b1)      // 1'b1 = Fixed priority arbitration, 1'b0 = Round-robin arbitration
                         )                ahb_interconnect_inst (
 
 // AHB CLOCK & RESET
@@ -595,6 +658,7 @@ ahb_interconnect_fused #(.NR_M         (1),        // Number of non-executable A
     .m_nx_haddr_i          ( m_nx_haddr_i                              ),
     .m_nx_hauser_i         ( m_nx_hsmode_i                             ),
     .m_nx_hburst_i         ( m_nx_hburst_i                             ),
+    .m_nx_hmaster_i        ({m_nx_hmaster_i, 3'b000}                   ),
     .m_nx_hmastlock_i      ( m_nx_hmastlock_i                          ),
     .m_nx_hprot_i          ( m_nx_hprot_i                              ),
     .m_nx_hsize_i          ( m_nx_hsize_i                              ),
@@ -614,7 +678,7 @@ ahb_interconnect_fused #(.NR_M         (1),        // Number of non-executable A
     .s_decoder_addr_o      ( s_decoder_addr                            ),
 
 // ADDRESS DECODER INTERFACES (FOR EXECUTABLE SUBORDINATES ONLY)
-    .s_x_decoder_1hot_i    ( s_x_decoder_1hot[1:0]                     ),
+    .s_x_decoder_1hot_i    ( s_x_decoder_1hot[2:0]                     ),
     .s_x_decoder_addr_o    ( s_x_decoder_addr                          ),
 
 // FUSED ROM CONTROLLER MEMORY INTERFACE  (slot 0 = low decoder bit)
@@ -624,12 +688,12 @@ ahb_interconnect_fused #(.NR_M         (1),        // Number of non-executable A
     .rom_clk_o             ( rom0_clk                                  ),
 
 // FUSED SRAM CONTROLLER MEMORY INTERFACE (slot 1 = high decoder bit)
-    .sram_dout_i           ( sram_x_dout                               ),
-    .sram_addr_o           ( sram_x_addr_full                          ),
-    .sram_cen_o            ( sram_x_cen                                ),
-    .sram_clk_o            ( sram_x_clk                                ),
-    .sram_din_o            ( sram_x_din                                ),
-    .sram_wen_o            ( sram_x_wen                                ),
+    .sram_dout_i           ({sram_lo_x_dout,      sram_x_dout         }),
+    .sram_addr_o           ({sram_lo_x_addr_full, sram_x_addr_full    }),
+    .sram_cen_o            ({sram_lo_x_cen,       sram_x_cen          }),
+    .sram_clk_o            ({sram_lo_x_clk,       sram_x_clk          }),
+    .sram_din_o            ({sram_lo_x_din,       sram_x_din          }),
+    .sram_wen_o            ({sram_lo_x_wen,       sram_x_wen          }),
 
 // NON-EXECUTABLE AHB SUBORDINATE INTERFACES
     .s_nx_hrdata_i         ({s_aclint_hrdata,    s_plic_hrdata,    s_periph2_hrdata,    s_periph1_hrdata,    s_periph0_hrdata,    s_sram_nx_hrdata    }),
@@ -653,7 +717,8 @@ ahb_interconnect_fused #(.NR_M         (1),        // Number of non-executable A
 // physical address width (the legacy ahb_rom_controller / ahb_sram_controller
 // performed the slicing themselves; here it is explicit).
 assign rom0_addr   = rom0_addr_full  [ROM_ADDRW-1:0];
-assign sram_x_addr = sram_x_addr_full[SRAM_X_ADDRW-1:0];
+assign sram_x_addr    = sram_x_addr_full[SRAM_X_ADDRW-1:0];
+assign sram_lo_x_addr = sram_lo_x_addr_full[SRAM_LO_X_ADDRW-1:0];
 
 
 //=============================================================================
@@ -661,9 +726,10 @@ assign sram_x_addr = sram_x_addr_full[SRAM_X_ADDRW-1:0];
 //=============================================================================
 `else
 
-ahb_interconnect_generic #(.NR_M    (2),       // Number of AHB Managers
-                           .NR_S    (8),       // Number of AHB Subordinates
-                           .HAUSER_W(HAUSER_W) // Width of the HAUSER bus (min value is 1)
+ahb_interconnect_generic #(.NR_M          (2),       // Number of AHB Managers
+                           .NR_S          (9),       // Number of AHB Subordinates
+                           .M_HMASTER_TAG (8'h80),   // Data port tag (data_hmaster_o) on HMASTER[3]
+                           .HAUSER_W      (HAUSER_W) // Width of the HAUSER bus (min value is 1)
 )                                        ahb_interconnect_generic_inst (
 
 // AHB CLOCK & RESET
@@ -673,19 +739,20 @@ ahb_interconnect_generic #(.NR_M    (2),       // Number of AHB Managers
     .hclk_en_o             ( interconnect_hclk_en                      ),
 
 // AHB MANAGER INTERFACES
-    .m_haddr_i             ({m_nx_haddr_i,       m_x_haddr_i          }),
-    .m_hauser_i            ({m_nx_hsmode_i,      m_x_hsmode_i         }),
-    .m_hburst_i            ({m_nx_hburst_i,      m_x_hburst_i         }),
-    .m_hmastlock_i         ({m_nx_hmastlock_i,   m_x_hmastlock_i      }),
-    .m_hprot_i             ({m_nx_hprot_i,       m_x_hprot_i          }),
-    .m_hsize_i             ({m_nx_hsize_i,       m_x_hsize_i          }),
-    .m_htrans_i            ({m_nx_htrans_i,      m_x_htrans_i         }),
-    .m_hwdata_i            ({m_nx_hwdata_i,      m_x_hwdata_i         }),
-    .m_hwrite_i            ({m_nx_hwrite_i,      m_x_hwrite_i         }),
+    .m_haddr_i             ({m_nx_haddr_i,           m_x_haddr_i      }),
+    .m_hauser_i            ({m_nx_hsmode_i,          m_x_hsmode_i     }),
+    .m_hburst_i            ({m_nx_hburst_i,          m_x_hburst_i     }),
+    .m_hmaster_i           ({m_nx_hmaster_i, 3'b000, 4'h0             }),
+    .m_hmastlock_i         ({m_nx_hmastlock_i,       m_x_hmastlock_i  }),
+    .m_hprot_i             ({m_nx_hprot_i,           m_x_hprot_i      }),
+    .m_hsize_i             ({m_nx_hsize_i,           m_x_hsize_i      }),
+    .m_htrans_i            ({m_nx_htrans_i,          m_x_htrans_i     }),
+    .m_hwdata_i            ({m_nx_hwdata_i,          m_x_hwdata_i     }),
+    .m_hwrite_i            ({m_nx_hwrite_i,          m_x_hwrite_i     }),
 
-    .m_hrdata_o            ({m_nx_hrdata_o,      m_x_hrdata_o         }),
-    .m_hready_o            ({m_nx_hready_o,      m_x_hready_o         }),
-    .m_hresp_o             ({m_nx_hresp_o,       m_x_hresp_o          }),
+    .m_hrdata_o            ({m_nx_hrdata_o,          m_x_hrdata_o     }),
+    .m_hready_o            ({m_nx_hready_o,          m_x_hready_o     }),
+    .m_hresp_o             ({m_nx_hresp_o,           m_x_hresp_o      }),
 
 // ARBITER INTERFACES
     .m_grant_i             ( m_grant                                   ),
@@ -696,21 +763,21 @@ ahb_interconnect_generic #(.NR_M    (2),       // Number of AHB Managers
     .s_decoder_addr_o      ( s_decoder_addr                            ),
 
 // AHB SUBORDINATE INTERFACES
-    .s_hrdata_i            ({s_aclint_hrdata,    s_plic_hrdata,    s_periph2_hrdata,    s_periph1_hrdata,    s_periph0_hrdata,    s_sram_nx_hrdata,    s_sram_x_hrdata,     s_rom_hrdata    }),
-    .s_hreadyout_i         ({s_aclint_hreadyout, s_plic_hreadyout, s_periph2_hreadyout, s_periph1_hreadyout, s_periph0_hreadyout, s_sram_nx_hreadyout, s_sram_x_hreadyout,  s_rom_hreadyout }),
-    .s_hresp_i             ({s_aclint_hresp,     s_plic_hresp,     s_periph2_hresp,     s_periph1_hresp,     s_periph0_hresp,     s_sram_nx_hresp,     s_sram_x_hresp,      s_rom_hresp     }),
-    .s_haddr_o             ({s_aclint_haddr,     s_plic_haddr,     s_periph2_haddr,     s_periph1_haddr,     s_periph0_haddr,     s_sram_nx_haddr,     s_sram_x_haddr,      s_rom_haddr     }),
-    .s_hauser_o            ({s_aclint_hauser,    s_plic_hauser,    s_periph2_hauser,    s_periph1_hauser,    s_periph0_hauser,    s_sram_nx_hauser,    s_sram_x_hauser,     s_rom_hauser    }),
-    .s_hburst_o            ({s_aclint_hburst,    s_plic_hburst,    s_periph2_hburst,    s_periph1_hburst,    s_periph0_hburst,    s_sram_nx_hburst,    s_sram_x_hburst,     s_rom_hburst    }),
-    .s_hmaster_o           ({s_aclint_hmaster,   s_plic_hmaster,   s_periph2_hmaster,   s_periph1_hmaster,   s_periph0_hmaster,   s_sram_nx_hmaster,   s_sram_x_hmaster,    s_rom_hmaster   }),
-    .s_hmastlock_o         ({s_aclint_hmastlock, s_plic_hmastlock, s_periph2_hmastlock, s_periph1_hmastlock, s_periph0_hmastlock, s_sram_nx_hmastlock, s_sram_x_hmastlock,  s_rom_hmastlock }),
-    .s_hprot_o             ({s_aclint_hprot,     s_plic_hprot,     s_periph2_hprot,     s_periph1_hprot,     s_periph0_hprot,     s_sram_nx_hprot,     s_sram_x_hprot,      s_rom_hprot     }),
-    .s_hready_o            ({s_aclint_hready,    s_plic_hready,    s_periph2_hready,    s_periph1_hready,    s_periph0_hready,    s_sram_nx_hready,    s_sram_x_hready,     s_rom_hready    }),
-    .s_hsel_o              ({s_aclint_hsel,      s_plic_hsel,      s_periph2_hsel,      s_periph1_hsel,      s_periph0_hsel,      s_sram_nx_hsel,      s_sram_x_hsel,       s_rom_hsel      }),
-    .s_hsize_o             ({s_aclint_hsize,     s_plic_hsize,     s_periph2_hsize,     s_periph1_hsize,     s_periph0_hsize,     s_sram_nx_hsize,     s_sram_x_hsize,      s_rom_hsize     }),
-    .s_htrans_o            ({s_aclint_htrans,    s_plic_htrans,    s_periph2_htrans,    s_periph1_htrans,    s_periph0_htrans,    s_sram_nx_htrans,    s_sram_x_htrans,     s_rom_htrans    }),
-    .s_hwdata_o            ({s_aclint_hwdata,    s_plic_hwdata,    s_periph2_hwdata,    s_periph1_hwdata,    s_periph0_hwdata,    s_sram_nx_hwdata,    s_sram_x_hwdata,     s_rom_hwdata    }),
-    .s_hwrite_o            ({s_aclint_hwrite,    s_plic_hwrite,    s_periph2_hwrite,    s_periph1_hwrite,    s_periph0_hwrite,    s_sram_nx_hwrite,    s_sram_x_hwrite,     s_rom_hwrite    })
+    .s_hrdata_i            ({s_aclint_hrdata,    s_plic_hrdata,    s_periph2_hrdata,    s_periph1_hrdata,    s_periph0_hrdata,    s_sram_nx_hrdata,    s_sram_lo_x_hrdata,  s_sram_x_hrdata,     s_rom_hrdata    }),
+    .s_hreadyout_i         ({s_aclint_hreadyout, s_plic_hreadyout, s_periph2_hreadyout, s_periph1_hreadyout, s_periph0_hreadyout, s_sram_nx_hreadyout, s_sram_lo_x_hreadyout,  s_sram_x_hreadyout,  s_rom_hreadyout }),
+    .s_hresp_i             ({s_aclint_hresp,     s_plic_hresp,     s_periph2_hresp,     s_periph1_hresp,     s_periph0_hresp,     s_sram_nx_hresp,     s_sram_lo_x_hresp,      s_sram_x_hresp,      s_rom_hresp     }),
+    .s_haddr_o             ({s_aclint_haddr,     s_plic_haddr,     s_periph2_haddr,     s_periph1_haddr,     s_periph0_haddr,     s_sram_nx_haddr,     s_sram_lo_x_haddr,      s_sram_x_haddr,      s_rom_haddr     }),
+    .s_hauser_o            ({s_aclint_hauser,    s_plic_hauser,    s_periph2_hauser,    s_periph1_hauser,    s_periph0_hauser,    s_sram_nx_hauser,    s_sram_lo_x_hauser,  s_sram_x_hauser,     s_rom_hauser    }),
+    .s_hburst_o            ({s_aclint_hburst,    s_plic_hburst,    s_periph2_hburst,    s_periph1_hburst,    s_periph0_hburst,    s_sram_nx_hburst,    s_sram_lo_x_hburst,  s_sram_x_hburst,     s_rom_hburst    }),
+    .s_hmaster_o           ({s_aclint_hmaster,   s_plic_hmaster,   s_periph2_hmaster,   s_periph1_hmaster,   s_periph0_hmaster,   s_sram_nx_hmaster,   s_sram_lo_x_hmaster,    s_sram_x_hmaster,    s_rom_hmaster   }),
+    .s_hmastlock_o         ({s_aclint_hmastlock, s_plic_hmastlock, s_periph2_hmastlock, s_periph1_hmastlock, s_periph0_hmastlock, s_sram_nx_hmastlock, s_sram_lo_x_hmastlock,  s_sram_x_hmastlock,  s_rom_hmastlock }),
+    .s_hprot_o             ({s_aclint_hprot,     s_plic_hprot,     s_periph2_hprot,     s_periph1_hprot,     s_periph0_hprot,     s_sram_nx_hprot,     s_sram_lo_x_hprot,      s_sram_x_hprot,      s_rom_hprot     }),
+    .s_hready_o            ({s_aclint_hready,    s_plic_hready,    s_periph2_hready,    s_periph1_hready,    s_periph0_hready,    s_sram_nx_hready,    s_sram_lo_x_hready,  s_sram_x_hready,     s_rom_hready    }),
+    .s_hsel_o              ({s_aclint_hsel,      s_plic_hsel,      s_periph2_hsel,      s_periph1_hsel,      s_periph0_hsel,      s_sram_nx_hsel,      s_sram_lo_x_hsel,       s_sram_x_hsel,       s_rom_hsel      }),
+    .s_hsize_o             ({s_aclint_hsize,     s_plic_hsize,     s_periph2_hsize,     s_periph1_hsize,     s_periph0_hsize,     s_sram_nx_hsize,     s_sram_lo_x_hsize,      s_sram_x_hsize,      s_rom_hsize     }),
+    .s_htrans_o            ({s_aclint_htrans,    s_plic_htrans,    s_periph2_htrans,    s_periph1_htrans,    s_periph0_htrans,    s_sram_nx_htrans,    s_sram_lo_x_htrans,  s_sram_x_htrans,     s_rom_htrans    }),
+    .s_hwdata_o            ({s_aclint_hwdata,    s_plic_hwdata,    s_periph2_hwdata,    s_periph1_hwdata,    s_periph0_hwdata,    s_sram_nx_hwdata,    s_sram_lo_x_hwdata,  s_sram_x_hwdata,     s_rom_hwdata    }),
+    .s_hwrite_o            ({s_aclint_hwrite,    s_plic_hwrite,    s_periph2_hwrite,    s_periph1_hwrite,    s_periph0_hwrite,    s_sram_nx_hwrite,    s_sram_lo_x_hwrite,  s_sram_x_hwrite,     s_rom_hwrite    })
  );
 
 `endif
@@ -731,18 +798,20 @@ assign  interconnect_hclk  =  (hclk_i & interconnect_hclk_en_latch);
 // No arbitration, only one NX master
 assign m_nx_grant = m_nx_request;
 
-ahb_decoder #(.ROM_SIZE(ROM_SIZE), .SRAM_X_SIZE(SRAM_X_SIZE), .SRAM_NX_SIZE(SRAM_NX_SIZE)) ahb_decoder_x_inst (
+ahb_decoder #(.ROM_SIZE(ROM_SIZE), .SRAM_X_SIZE(SRAM_X_SIZE), .SRAM_NX_SIZE(SRAM_NX_SIZE), .SRAM_LO_X_SIZE(SRAM_LO_X_SIZE)) ahb_decoder_x_inst (
     .decoder_addr_i        ( s_x_decoder_addr                          ),
-    .decoder_1hot_o        ( s_x_decoder_1hot                          )
+    .sram_x_alias_en_i     ( sram_x_alias_en                           ),
+    .decoder_1hot_o        ( s_x_decoder_1hot_raw                      )
 );
 `elsif FUSED_AHB
 
 // No arbitration, only one NX master  (same as HIPERF)
 assign m_nx_grant = m_nx_request;
 
-ahb_decoder #(.ROM_SIZE(ROM_SIZE), .SRAM_X_SIZE(SRAM_X_SIZE), .SRAM_NX_SIZE(SRAM_NX_SIZE)) ahb_decoder_x_inst (
+ahb_decoder #(.ROM_SIZE(ROM_SIZE), .SRAM_X_SIZE(SRAM_X_SIZE), .SRAM_NX_SIZE(SRAM_NX_SIZE), .SRAM_LO_X_SIZE(SRAM_LO_X_SIZE)) ahb_decoder_x_inst (
     .decoder_addr_i        ( s_x_decoder_addr                          ),
-    .decoder_1hot_o        ( s_x_decoder_1hot                          )
+    .sram_x_alias_en_i     ( sram_x_alias_en                           ),
+    .decoder_1hot_o        ( s_x_decoder_1hot_raw                      )
 );
 `else
 
@@ -757,10 +826,11 @@ ahb_arbiter ahb_arbiter_inst (
 `endif
 
 
-ahb_decoder #(.ROM_SIZE(ROM_SIZE), .SRAM_X_SIZE(SRAM_X_SIZE), .SRAM_NX_SIZE(SRAM_NX_SIZE)) ahb_decoder_inst   (
+ahb_decoder #(.ROM_SIZE(ROM_SIZE), .SRAM_X_SIZE(SRAM_X_SIZE), .SRAM_NX_SIZE(SRAM_NX_SIZE), .SRAM_LO_X_SIZE(SRAM_LO_X_SIZE)) ahb_decoder_inst   (
 
     .decoder_addr_i        ( s_decoder_addr                            ),
-    .decoder_1hot_o        ( s_decoder_1hot                            )
+    .sram_x_alias_en_i     ( sram_x_alias_en                           ),
+    .decoder_1hot_o        ( s_decoder_1hot_raw                        )
 );
 
 
@@ -949,6 +1019,101 @@ sram #(SRAM_X_ADDRW, SRAM_X_SIZE) sram_x_inst (
     .sram_clk_i            ( sram_x_clk                                ),
     .sram_din_i            ( sram_x_din                                ),
     .sram_wen_i            ( sram_x_wen                                )
+);
+
+
+//=============================================================================
+// 6.1)  EXECUTABLE SRAM MEMORY AT ADDRESS 0 (used for the PMP ARCH-TEST)
+//=============================================================================
+//   FUSED_AHB: same fusing pattern as ROM section above.
+//
+`ifndef FUSED_AHB
+
+ahb_waitstate_inserter #(HAUSER_W) ahb_waitstate_inserter_sram_lo_x_inst (
+
+// AHB CLOCK & RESET
+    .hclk_i                ( s_sram_lo_x_hclk                          ),
+    .hresetn_i             ( hresetn_i                                 ),
+    .hclk_en_o             ( s_sram_lo_x_hclk_en                       ),
+
+    .number_ws_i           ( s_sram_x_number_ws_i                      ),  // Use same setting as the other executable SRAM
+    .random_ws_en_i        ( s_sram_x_random_ws_en_i                   ),  // Use same setting as the other executable SRAM
+
+// AHB INTERFACE (TO FABRIC OR DRIVER)
+    .haddr_i               ( s_sram_lo_x_haddr                         ),
+    .hauser_i              ( s_sram_lo_x_hauser                        ),
+    .hprot_i               ( s_sram_lo_x_hprot                         ),
+    .hready_i              ( s_sram_lo_x_hready                        ),
+    .hsize_i               ( s_sram_lo_x_hsize                         ),
+    .htrans_i              ( s_sram_lo_x_htrans                        ),
+    .hwdata_i              ( s_sram_lo_x_hwdata                        ),
+    .hwrite_i              ( s_sram_lo_x_hwrite                        ),
+    .hsel_i                ( s_sram_lo_x_hsel                          ),
+    .hrdata_o              ( s_sram_lo_x_hrdata                        ),
+    .hreadyout_o           ( s_sram_lo_x_hreadyout                     ),
+    .hresp_o               ( s_sram_lo_x_hresp                         ),
+
+// AHB INTERFACE (TO AHB SUBORDINATE)
+    .s_haddr_o             ( ws_s_sram_lo_x_haddr                      ),
+    .s_hauser_o            ( ws_s_sram_lo_x_hauser                     ),
+    .s_hprot_o             ( ws_s_sram_lo_x_hprot                      ),
+    .s_hready_o            ( ws_s_sram_lo_x_hready                     ),
+    .s_hsize_o             ( ws_s_sram_lo_x_hsize                      ),
+    .s_htrans_o            ( ws_s_sram_lo_x_htrans                     ),
+    .s_hwdata_o            ( ws_s_sram_lo_x_hwdata                     ),
+    .s_hwrite_o            ( ws_s_sram_lo_x_hwrite                     ),
+    .s_hsel_o              ( ws_s_sram_lo_x_hsel                       ),
+    .s_hrdata_i            ( ws_s_sram_lo_x_hrdata                     ),
+    .s_hreadyout_i         ( ws_s_sram_lo_x_hreadyout                  ),
+    .s_hresp_i             ( ws_s_sram_lo_x_hresp                      )
+ );
+
+ahb_sram_controller #(SRAM_LO_X_SIZE) ahb_sram_lo_x_ctrl_inst (
+
+// AHB CLOCK & RESET
+    .hclk_i                ( s_sram_lo_x_hclk                          ),
+    .hresetn_i             ( hresetn_i                                 ),
+    .hclk_en_o             ( ws_s_sram_lo_x_hclk_en                    ),
+
+// AHB INTERFACE
+    .haddr_i               ( ws_s_sram_lo_x_haddr[SRAM_LO_X_HADDRW-1:0] ),
+    .hready_i              ( ws_s_sram_lo_x_hready                     ),
+    .hsize_i               ( ws_s_sram_lo_x_hsize                      ),
+    .htrans_i              ( ws_s_sram_lo_x_htrans                     ),
+    .hwdata_i              ( ws_s_sram_lo_x_hwdata                     ),
+    .hwrite_i              ( ws_s_sram_lo_x_hwrite                     ),
+    .hsel_i                ( ws_s_sram_lo_x_hsel                       ),
+    .hrdata_o              ( ws_s_sram_lo_x_hrdata                     ),
+    .hreadyout_o           ( ws_s_sram_lo_x_hreadyout                  ),
+    .hresp_o               ( ws_s_sram_lo_x_hresp                      ),
+
+// SRAM INTERFACE
+    .sram_dout_i           ( sram_lo_x_dout                            ),
+    .sram_addr_o           ( sram_lo_x_addr                            ),
+    .sram_cen_o            ( sram_lo_x_cen                             ),
+    .sram_clk_o            ( sram_lo_x_clk                             ),
+    .sram_din_o            ( sram_lo_x_din                             ),
+    .sram_wen_o            ( sram_lo_x_wen                             )
+ );
+
+// Architectural clock-gate
+always @(hclk_i or s_sram_lo_x_hclk_en or ws_s_sram_lo_x_hclk_en)
+  if (~hclk_i) s_sram_lo_x_hclk_en_latch <= (s_sram_lo_x_hclk_en | ws_s_sram_lo_x_hclk_en);
+assign  s_sram_lo_x_hclk  =  (hclk_i & s_sram_lo_x_hclk_en_latch);
+
+`endif // FUSED_AHB
+
+sram #(SRAM_LO_X_ADDRW, SRAM_LO_X_SIZE) sram_lo_x_inst (
+
+// OUTPUTs
+    .sram_dout_o           ( sram_lo_x_dout                            ),
+
+// INPUTs
+    .sram_addr_i           ( sram_lo_x_addr                            ),
+    .sram_cen_i            ( sram_lo_x_cen                             ),
+    .sram_clk_i            ( sram_lo_x_clk                             ),
+    .sram_din_i            ( sram_lo_x_din                             ),
+    .sram_wen_i            ( sram_lo_x_wen                             )
 );
 
 
@@ -1320,11 +1485,24 @@ assign  s_periph2_hclk  =  (hclk_i & s_periph2_hclk_en_latch);
 // SU_MODE_EN follows the core's SU_MODE_EN via parameter.
 // No wait-state inserter; the fabric-side signals feed the PLIC AHB port directly.
 
+// Privilege checking on the ACLINT / PLIC register windows. Default 1: the
+// ACLINT denies non-M access to MSWI/MTIMER and non-M/S access to SSWI, and the
+// PLIC denies non-M access to its M-mode context.
+//
+// Overridable because the riscv-arch-test reference platform models a CLINT with
+// NO access control -- policing MMIO privilege is left to PMP there, and aRVern
+// implements no PMP.
+`ifdef ARV_TB_IO_PRIV_CHECK_EN
+localparam IO_PRIV_CHECK_EN = `ARV_TB_IO_PRIV_CHECK_EN;
+`else
+localparam IO_PRIV_CHECK_EN = 1;
+`endif
+
 ahb_plic #(.NUM_SOURCES    ( PLIC_NUM_SRC     ),
            .NUM_HARTS      ( 1                ),
            .SU_MODE_EN     ( PLIC_SU_MODE_EN  ),
            .PRIO_BITS      ( 3                ),
-           .PRIV_CHECK_EN  ( 1                )) ahb_plic_inst (
+           .PRIV_CHECK_EN  ( IO_PRIV_CHECK_EN )) ahb_plic_inst (
 
 // AHB CLOCK & RESET
     .hclk_i                ( s_plic_hclk                               ),
@@ -1367,13 +1545,27 @@ assign  s_plic_hclk  =  (hclk_i & s_plic_hclk_en_latch);
 // SU_MODE_EN follows the core's SU_MODE_EN via the existing parameter.
 // hclk_aon_i + clk_lf_i + resetn_lf_i come from the testbench top.
 
-ahb_aclint #(.NUM_HARTS     ( 1               ),
-             .SU_MODE_EN    ( PLIC_SU_MODE_EN ),
-             .PRIV_CHECK_EN ( 1               )) ahb_aclint_inst (
+// ACLINT SELECTION. Default is the real ahb_aclint IP. sim/arch_test swaps in
+// bench/verilog/aclint_model.v instead -- a behavioural model of the REFERENCE
+// platform (wall-clock-paced MTIME, zero-latency MTIP, no CDC).
+// See the header of that file for why, and note that an arch-test run then says
+// nothing about the real IP: that is covered by the ahb_aclint block regression
+// and the trap_irq_aclint_* tests here.
+`ifdef ARV_TB_ACLINT_MODEL
+
+aclint_model #(.NUM_HARTS       ( 1                        ),
+               .SU_MODE_EN      ( PLIC_SU_MODE_EN          )) ahb_aclint_inst (
+`else
+
+ahb_aclint #(.NUM_HARTS     ( 1                   ),
+             .SU_MODE_EN    ( PLIC_SU_MODE_EN     ),
+             .PRIV_CHECK_EN ( IO_PRIV_CHECK_EN    )) ahb_aclint_inst (
+`endif
 
 // AHB CLOCK, RESET & WAKEUP
     .hclk_i                ( s_aclint_hclk                             ),
     .hclk_aon_i            ( hclk_aon_i                                ),
+    .hclk_aon_en_i         ( hclk_aon_en_i                             ),
     .hresetn_i             ( hresetn_i                                 ),
     .hclk_en_o             ( s_aclint_hclk_en                          ),
     .mtimer_wake_lf_o      ( aclint_mtimer_wake_lf_o                   ),
@@ -1381,6 +1573,7 @@ ahb_aclint #(.NUM_HARTS     ( 1               ),
 // LOW-FREQUENCY CLOCK & RESET
     .clk_lf_i              ( clk_lf_i                                  ),
     .resetn_lf_i           ( resetn_lf_i                               ),
+    .scan_mode_i           ( 1'b0                                      ),   // functional mode
 
 // AHB-LITE SLAVE INTERFACE
     .hsel_i                ( s_aclint_hsel                             ),
@@ -1501,6 +1694,25 @@ assign                   ws_s_sram_x_hprot_unused     = ws_s_sram_x_hprot;
 
 wire  [31:SRAM_X_HADDRW] ws_s_sram_x_haddr_unused;
 assign                   ws_s_sram_x_haddr_unused     = ws_s_sram_x_haddr[31:SRAM_X_HADDRW];
+
+// Executable SRAM at address 0
+wire               [2:0] s_sram_lo_x_hburst_unused;
+assign                   s_sram_lo_x_hburst_unused    = s_sram_lo_x_hburst;
+
+wire               [3:0] s_sram_lo_x_hmaster_unused;
+assign                   s_sram_lo_x_hmaster_unused   = s_sram_lo_x_hmaster;
+
+wire                     s_sram_lo_x_hmastlock_unused;
+assign                   s_sram_lo_x_hmastlock_unused = s_sram_lo_x_hmastlock;
+
+wire      [HAUSER_W-1:0] ws_s_sram_lo_x_hauser_unused;
+assign                   ws_s_sram_lo_x_hauser_unused = ws_s_sram_lo_x_hauser;
+
+wire               [3:0] ws_s_sram_lo_x_hprot_unused;
+assign                   ws_s_sram_lo_x_hprot_unused  = ws_s_sram_lo_x_hprot;
+
+wire [31:SRAM_LO_X_HADDRW] ws_s_sram_lo_x_haddr_unused;
+assign                     ws_s_sram_lo_x_haddr_unused = ws_s_sram_lo_x_haddr[31:SRAM_LO_X_HADDRW];
 `else
 // FUSED_AHB: absorb the now-unused WS configuration inputs.
 wire              [31:0] s_rom_number_ws_unused;

@@ -47,13 +47,12 @@ reg            [31:0] mem [0:(MEM_SIZE/4)-1];
 reg   [MEM_ADDRW-1:0] rom_addr_reg;
 integer               idx;
    
+// `mem` is initialized by the testbench (zero-fill then $readmemh), NOT here: two
+// initial blocks writing the same array have undefined relative order, and a simulator
+// that ran this one second would erase the loaded program.
 initial
   begin
     rom_addr_reg = {MEM_ADDRW{1'b0}};
-
-    for (idx=0; idx < MEM_SIZE/4; idx=idx+1)
-      mem[idx] = {32{1'b0}};
-
   end
 
 always @(posedge rom_clk_i)

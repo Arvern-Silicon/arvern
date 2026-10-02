@@ -10,9 +10,10 @@
 # Full license text is available in the LICENSE file at the repository root.
 #----------------------------------------------------------------------------
 # Description: SU_MODE PRIV - Trap delegation inert under SU_MODE_EN=0
-#   Under SU_MODE_EN=0, mideleg/medeleg are RAZ/WI; even firmware that
-#   attempts to delegate cannot redirect traps to S-mode. Verify by:
-#     - writing 0xFFFFFFFF to mideleg (silently ignored, reads 0)
+#   Under SU_MODE_EN=0 there is nowhere to delegate to, and mideleg/medeleg do
+#   not exist at all (Priv 3.1.8) -- firmware cannot even express the attempt.
+#   Their absence is covered by trap_priv_smode_csrs_absent; what matters here is
+#   where the resulting trap actually lands. Verify by:
 #     - asserting timer IRQ
 #     - confirming the M-mode handler (at mtvec) runs (not stvec)
 #       and mcause = 0x80000007 (Machine Timer Interrupt)
@@ -20,6 +21,8 @@
 #   Phase 2: deleg-write + timer IRQ -> M-mode handler runs, mcause MTI.
 #----------------------------------------------------------------------------
 
+
+.include "firmware_config.inc"
 .section .text
 .global main
 
@@ -33,7 +36,6 @@
 #   0x10: trap_handled flag   (set to 1 by handler)
 #
 # Phase 2 captures:
-#   0x20: mideleg readback after write 0xFFFFFFFF (expect 0)
 #   0x24: trap_count after IRQ (expect 1)
 #   0x28: MCAUSE              (expect 0x80000007)
 #=========================================================================
@@ -99,6 +101,10 @@ trap_handler:
     la   t0, trap_handler
     csrw mtvec, t0
 
+    # Smrnmi: NMIE resets to 0 and masks ALL interrupts -- boot code
+    # parts must set mnstatus.NMIE=1. Smrnmi is unconditional. csr 0x744 traps.
+    csrsi 0x744, 8              # mnstatus.NMIE = 1
+
     # Initialize callee-saved registers (RV32E-safe markers in x0-x15)
     li   s0, 0xAAAAAAAA
     li   a0, 0xBBBBBBBB
@@ -113,16 +119,8 @@ trap_handler:
     # PHASE 2: Attempt to delegate, then take a timer IRQ.
     #=================================================================
 
-    # Try to delegate ALL interrupts AND exceptions to S-mode.
-    li   t0, 0xFFFFFFFF
-    csrw 0x303, t0             # mideleg -- silently dropped (RAZ/WI)
-    li   t0, 0xFFFFFFFF
-    csrw 0x302, t0             # medeleg -- silently dropped
-
-    # Snapshot mideleg readback (expect 0)
-    csrr t0, 0x303
-    sw   t0, 0x20(s1)
-    lw   t0, 0x20(s1)         # load-back fence
+    # No delegation attempt is possible: mideleg/medeleg do not exist without
+    # S-mode, so an access would raise illegal-instruction rather than be dropped.
 
     # Enable MIE.MTIE (bit 7)
     li   t0, 0x80
@@ -130,6 +128,9 @@ trap_handler:
 
     # Enable MSTATUS.MIE (bit 3)
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Clear handled flag

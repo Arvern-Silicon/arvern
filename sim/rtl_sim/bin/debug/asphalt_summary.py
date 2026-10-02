@@ -28,6 +28,8 @@ import argparse
 import os
 from collections import deque
 
+from pitstop import load_pitstop_events
+
 
 # ---------------------------------------------------------------------------
 # Parsing
@@ -148,6 +150,8 @@ def main():
                         help='Consecutive PC-window repetitions before declaring livelock (default: 100)')
     parser.add_argument('--traps-only', action='store_true',
                         help='Only show trap events table, skip MRET and livelock sections')
+    parser.add_argument('--no-debug-events', action='store_true',
+                        help='Skip the external-debug activity section (pitstop.log)')
     args = parser.parse_args()
 
     if not os.path.isfile(args.logfile):
@@ -201,6 +205,24 @@ def main():
         print("No livelock detected.")
 
     print()
+
+    # --- External-debug activity (pitstop.log) ---
+    if not args.no_debug_events:
+        dbg_path, events = load_pitstop_events(args.logfile)
+        if events:
+            n_dmi = sum(1 for e in events if e['src'] == 'DMI')
+            n_sba = sum(1 for e in events if e['src'] == 'SBA')
+            enters = [e for e in events if e['src'] == 'DBG' and 'ENTER' in e['text']]
+            exits  = [e for e in events if e['src'] == 'DBG' and 'EXIT'  in e['text']]
+            print(f"Debug activity ({os.path.basename(dbg_path)}): "
+                  f"{n_dmi} DMI, {n_sba} SBA, {len(enters)} halt-enter, {len(exits)} resume")
+            for idx, e in enumerate(enters, 1):
+                # e['text'] == "DBG  ENTER Debug Mode  cause=<name>  dpc=0x<val>"
+                detail = e['text'].split('ENTER Debug Mode', 1)[-1].strip()
+                print(f"  #{idx:<3d} cycle={e['cycle']:<8d} ENTER  {detail}")
+            for idx, e in enumerate(exits, 1):
+                print(f"  #{idx:<3d} cycle={e['cycle']:<8d} EXIT   (resume)")
+            print()
 
 
 if __name__ == '__main__':

@@ -19,12 +19,13 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-reg [31:0] p1_event_ff;
+reg [31:0] p1_event_12;
+reg [31:0] p1_event_ff12;
 reg [31:0] p2_event_13;
 reg [31:0] p2_event_1f;
 reg [31:0] p3_inhibit_ff;
 
-`define SPAD(byte_off) (byte_off/4)
+`define SPAD(byte_off) ((byte_off)/4)
 
 initial
    begin
@@ -54,45 +55,55 @@ initial
       @(probes_cpu.x31 == 32'h11111111);
       repeat(3) @(posedge free_clk);
 
-      p1_event_ff = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h00)];
-      $display("  Phase 1: mhpmevent3 WARL (write 0xFFFFFFFF)");
-      $display("    readback = 0x%h  %t ns", p1_event_ff, $time);
+      p1_event_12   = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h00)];
+      p1_event_ff12 = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h04)];
+      $display("  Phase 1: mhpmevent3 WARL");
+      $display("    write 0x00000012 → readback = 0x%h  %t ns", p1_event_12, $time);
+      $display("    write 0xFFFFFF12 → readback = 0x%h  %t ns", p1_event_ff12, $time);
 
-      if (p1_event_ff[4:0] === 5'h1F && p1_event_ff[31:5] === 27'h0)
-         $display("  PASS  phase1: mhpmevent3[4:0]=0x1F, bits[31:5]=0 (5-bit WARL correct)  %t ns", $time);
+      if (p1_event_12 === 32'h00000012)
+         $display("  PASS  phase1a: implemented selector 0x12 stored verbatim, bits[31:5]=0  %t ns", $time);
       else begin
-         $display("  ERROR phase1: mhpmevent3=0x%h, expected 0x0000001F  %t ns",
-                  p1_event_ff, $time);
+         $display("  ERROR phase1a: write 0x12 → got 0x%h, expected 0x00000012  %t ns",
+                  p1_event_12, $time);
+         error = error + 1;
+      end
+
+      if (p1_event_ff12 === 32'h00000000)
+         $display("  PASS  phase1b: write with bits above [4:0] set folds to 0 (strict WARL)  %t ns", $time);
+      else begin
+         $display("  ERROR phase1b: write 0xFFFFFF12 → got 0x%h, expected 0x00000000 (unimplemented value folds to 0)  %t ns",
+                  p1_event_ff12, $time);
          error = error + 1;
       end
 
 
       //=================================================================
-      // PHASE 2: mhpmevent3 reserved code write/readback
+      // PHASE 2: mhpmevent3 unimplemented selector write/readback
       //=================================================================
       @(probes_cpu.x31 == 32'h22222222);
       repeat(3) @(posedge free_clk);
 
-      p2_event_13 = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h04)];
-      p2_event_1f = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h08)];
+      p2_event_13 = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h08)];
+      p2_event_1f = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h0C)];
 
       $display("");
-      $display("  Phase 2: mhpmevent3 reserved code readback");
+      $display("  Phase 2: mhpmevent3 unimplemented selector readback");
       $display("    write 0x13 → readback = 0x%h  %t ns", p2_event_13, $time);
       $display("    write 0x1F → readback = 0x%h  %t ns", p2_event_1f, $time);
 
-      if (p2_event_13[4:0] === 5'h13 && p2_event_13[31:5] === 27'h0)
-         $display("  PASS  phase2a: reserved 0x13 stored/read back correctly  %t ns", $time);
+      if (p2_event_13 === 32'h00000000)
+         $display("  PASS  phase2a: unimplemented selector 0x13 folds to 0 (strict WARL)  %t ns", $time);
       else begin
-         $display("  ERROR phase2a: write 0x13 → got 0x%h, expected 0x00000013  %t ns",
+         $display("  ERROR phase2a: write 0x13 → got 0x%h, expected 0x00000000 (unimplemented selector folds to 0)  %t ns",
                   p2_event_13, $time);
          error = error + 1;
       end
 
-      if (p2_event_1f[4:0] === 5'h1F && p2_event_1f[31:5] === 27'h0)
-         $display("  PASS  phase2b: reserved 0x1F stored/read back correctly  %t ns", $time);
+      if (p2_event_1f === 32'h00000000)
+         $display("  PASS  phase2b: unimplemented selector 0x1F folds to 0 (strict WARL)  %t ns", $time);
       else begin
-         $display("  ERROR phase2b: write 0x1F → got 0x%h, expected 0x0000001F  %t ns",
+         $display("  ERROR phase2b: write 0x1F → got 0x%h, expected 0x00000000 (unimplemented selector folds to 0)  %t ns",
                   p2_event_1f, $time);
          error = error + 1;
       end
@@ -104,7 +115,7 @@ initial
       wait(probes_cpu.x31 == 32'hdeadbeef);
       repeat(3) @(posedge free_clk);
 
-      p3_inhibit_ff = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h0C)];
+      p3_inhibit_ff = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h10)];
 
       $display("");
       $display("  Phase 3: mcountinhibit WARL (write 0xFFFFFFFF, ZIHPM_NR=%0d)", ZIHPM_NR);

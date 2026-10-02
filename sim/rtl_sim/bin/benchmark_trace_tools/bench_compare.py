@@ -15,12 +15,12 @@
 
 """bench_compare — Compare benchmark results across snapshots and latest traces.
 
-Usage (run from sim/rtl_sim/run/):
-    ../bin/bench_compare                            # list available snapshots
-    ../bin/bench_compare snap_a                     # snap_a vs latest
-    ../bin/bench_compare snap_a snap_b              # snap_a, snap_b, + latest
-    ../bin/bench_compare snap_a --attr ipc          # compare IPC
-    ../bin/bench_compare snap_a --suite embench     # embench only (Speed Score)
+Usage (run from sim/rtl_sim/run/ with PYTHONPATH=../bin):
+    python3 -m benchmark_trace_tools.bench_compare                        # list available snapshots
+    python3 -m benchmark_trace_tools.bench_compare snap_a                 # snap_a vs latest
+    python3 -m benchmark_trace_tools.bench_compare snap_a snap_b          # snap_a, snap_b, + latest
+    python3 -m benchmark_trace_tools.bench_compare snap_a --attr ipc      # compare IPC
+    python3 -m benchmark_trace_tools.bench_compare snap_a --suite embench # embench only (Speed Score)
 """
 
 import argparse

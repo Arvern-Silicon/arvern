@@ -82,6 +82,7 @@ _start:
 
     # Store nmi_handler address for testbench to configure nmi_vector
     la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
     sw   t0, 0x08(s1)
     lw   t3, 0x08(s1)          # fence: wait for SW AHB data phase before sync
 

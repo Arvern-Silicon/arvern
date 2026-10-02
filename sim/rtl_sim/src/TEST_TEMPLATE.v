@@ -32,6 +32,11 @@ initial begin
     // Wait for final sync and check results
     @(probes_cpu.x31==32'hdeadbeef);
     random_irq_enable = 0;       // Disable random IRQs before final checks
+    // Before reading MEMORY (check_mem_value) after a sync, drain the posted
+    // stores: under the wait-state variants (-rwsram, -wssram) a store issued
+    // just before the sync can still be on the bus. Use at least
+    //   repeat(40) @(posedge free_clk);
+    // Register checks (check_cpu_reg) need no drain.
     check_cpu_reg(1, 32'h0000000A);
     check_cpu_reg(3, 32'h0000001E);
     // ...

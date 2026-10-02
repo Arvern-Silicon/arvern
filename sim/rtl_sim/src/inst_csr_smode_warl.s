@@ -15,7 +15,8 @@
 #   scounteren (0x106): real WARL storage, low 11 bits writable.
 #   senvcfg    (0x10A): WARL hardwired zero (RAZ/WI).
 #   menvcfg    (0x30A): WARL hardwired zero (RAZ/WI).
-#   menvcfgh   (0x31A): WARL hardwired zero (RAZ/WI).
+#   menvcfgh   (0x31A): Ssdbltrp WARL -- only bit 27 (DTE) writable, resets
+#                       to 0x08000000 (DTE=1); all other bits read 0.
 #   satp       (0x180): WARL stub, MODE=Bare (RAZ/WI).
 #
 #   SIE/SIP mideleg mask: non-delegated SSIE/STIE/SEIE bits read as 0.
@@ -32,14 +33,20 @@
 #=========================================================================
 # Scratchpad layout (SRAM base 0x80000000)
 #
-#   0x00: scounteren readback  (expect 0x7E5 -- only [10:0] writable)
+#   0x00: scounteren readback  (0x7E5 masked to the implemented counters)
 #   0x04: senvcfg readback     (expect 0x0)
 #   0x08: menvcfg readback     (expect 0x0)
-#   0x0C: menvcfgh readback    (expect 0x0)
+#   0x0C: menvcfgh reset value (expect 0x08000000 -- DTE=1 out of reset)
 #   0x10: satp readback        (expect 0x0)
 #   0x14: sie readback         (expect 0x0   when mideleg=0 -- mask test)
 #   0x18: sie readback         (expect 0x222 when mideleg=0x222 -- delegated)
 #   0x1C: trap_count           (expect 0)
+#   0x20: menvcfgh after write 0xFFFFFFFF (expect 0x08000000 -- bit 27 only)
+#   0x24: menvcfgh after write 0x00000000 (expect 0x00000000 -- DTE clearable)
+#   0x28: menvcfgh after DTE restore      (expect 0x08000000)
+#   0x2C: sscratch after 0xAAAAAAAA       (expect 0xAAAAAAAA -- full 32-bit storage)
+#   0x30: sscratch after 0x55555555       (expect 0x55555555 -- every bit flips back)
+#   0x34: sscratch after 0xFFFFFFFF       (expect 0xFFFFFFFF)
 #=========================================================================
 
 main:
@@ -81,6 +88,12 @@ _start:
     sw   t0, 0x14(s1)
     sw   t0, 0x18(s1)
     sw   t0, 0x1C(s1)
+    sw   t0, 0x20(s1)
+    sw   t0, 0x24(s1)
+    sw   t0, 0x28(s1)
+    sw   t0, 0x2C(s1)
+    sw   t0, 0x30(s1)
+    sw   t0, 0x34(s1)
 
     # Install trap handler
     la   t0, trap_handler
@@ -91,19 +104,21 @@ _start:
 
     #=================================================================
     # PHASE 2: SCOUNTEREN (0x106) WARL storage
-    # Write 0xFFFFFFFF, read back -- only low 11 bits should latch.
+    # Write 0xFFFFFFFF, read back -- only bits [10:0] exist, and of those only
+    # the ones with a counter behind them latch (Priv 3.1.11: a counter-enable
+    # bit for an unimplemented counter is read-only zero).
     #=================================================================
 
     li   t0, 0xFFFFFFFF
     csrw 0x106, t0                # scounteren
     csrr t1, 0x106
-    sw   t1, 0x00(s1)             # expect 0x7FF (11 bits)
+    sw   t1, 0x00(s1)             # 0x7FF masked to the implemented counters
 
     # Restore scounteren to a known mid value to leave the state clean.
     li   t0, 0x000007E5            # CY=1, TM=0, IR=1, plus a few HPM bits
     csrw 0x106, t0
     csrr t1, 0x106
-    sw   t1, 0x00(s1)             # final readback 0x7E5
+    sw   t1, 0x00(s1)             # final readback, masked
 
     li   x31, 0x22222222
 
@@ -122,7 +137,11 @@ _start:
 
 
     #=================================================================
-    # PHASE 4: MENVCFG / MENVCFGH (0x30A / 0x31A) WARL hardwired zero
+    # PHASE 4: MENVCFG (0x30A) WARL hardwired zero;
+    #          MENVCFGH (0x31A) Ssdbltrp WARL -- only bit 27 (DTE)
+    #          writable, all other bits hardwired zero. Resets to
+    #          0x08000000 (DTE=1: protection-by-default; the spec leaves
+    #          the reset value UNSPECIFIED).
     #=================================================================
 
     li   t0, 0xDEADBEEF
@@ -130,10 +149,27 @@ _start:
     csrr t1, 0x30A
     sw   t1, 0x08(s1)             # expect 0
 
-    li   t0, 0x12345678
+    # menvcfgh reset value: DTE=1
+    csrr t1, 0x31A
+    sw   t1, 0x0C(s1)             # expect 0x08000000
+
+    # Write all-ones: only bit 27 must latch
+    li   t0, 0xFFFFFFFF
     csrw 0x31A, t0                # menvcfgh
     csrr t1, 0x31A
-    sw   t1, 0x0C(s1)             # expect 0
+    sw   t1, 0x20(s1)             # expect 0x08000000
+
+    # Write zero: DTE is WARL writable both ways
+    li   t0, 0x00000000
+    csrw 0x31A, t0
+    csrr t1, 0x31A
+    sw   t1, 0x24(s1)             # expect 0x00000000
+
+    # Restore DTE=1 (architectural reset default) before the test ends
+    li   t0, 0x08000000
+    csrw 0x31A, t0
+    csrr t1, 0x31A
+    sw   t1, 0x28(s1)             # expect 0x08000000
 
     li   x31, 0x44444444
 
@@ -181,6 +217,31 @@ _start:
     # Restore mideleg to a sane state
     li   t0, 0
     csrw mideleg, t0
+
+
+    #=================================================================
+    # PHASE 7: SSCRATCH (0x140) full 32-bit read/write storage
+    # sscratch has no WARL narrowing -- every bit must store and read
+    # back. The complementary patterns also drive each bit both ways.
+    #=================================================================
+
+    li   t0, 0xAAAAAAAA
+    csrw 0x140, t0                # sscratch
+    csrr t1, 0x140
+    sw   t1, 0x2C(s1)             # expect 0xAAAAAAAA
+
+    li   t0, 0x55555555           # complement: every bit flips 1 -> 0 and 0 -> 1
+    csrw 0x140, t0
+    csrr t1, 0x140
+    sw   t1, 0x30(s1)             # expect 0x55555555
+
+    li   t0, 0xFFFFFFFF
+    csrw 0x140, t0
+    csrr t1, 0x140
+    sw   t1, 0x34(s1)             # expect 0xFFFFFFFF
+
+    li   t0, 0                    # leave it clean
+    csrw 0x140, t0
 
     li   x31, 0xdeadbeef
 

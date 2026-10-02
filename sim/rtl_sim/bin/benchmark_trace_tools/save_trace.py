@@ -52,17 +52,16 @@ _RTL_DESC = {
     'MUL_TYPE':            {1: '1-cycle',        2: '4-cycle',        3: '16-cycle'},
     'DIV_TYPE':            {1: '12-cycle',       2: '17-cycle',       3: '33-cycle'},
     'CCSR_EN':             {0: 'absent',         1: 'present'},
-    'NMI_EN':              {0: 'absent',         1: 'Smrnmi present'},
     'SU_MODE_EN':          {0: 'M-only',         1: 'M+S+U'},
     'ZICNTR_EN':           {0: 'absent',         1: 'present'},
     'SINGLE_CYCLE_BRANCH': {0: 'one-bubble',     1: 'zero-bubble'},
-    # ZIHPM_NR and MVENDORID are free-valued (use raw integer / hex string)
+    # ZIHPM_NR is free-valued (use raw integer)
 }
 
 # Display order for RTL parameters in the metadata header
 _RTL_ORDER = ('RV32E_EN', 'C_EXTENSION', 'M_EXTENSION', 'B_EXTENSION',
-              'MUL_TYPE', 'DIV_TYPE', 'CCSR_EN', 'NMI_EN', 'SU_MODE_EN',
-              'ZICNTR_EN', 'ZIHPM_NR', 'SINGLE_CYCLE_BRANCH', 'MVENDORID')
+              'MUL_TYPE', 'DIV_TYPE', 'CCSR_EN', 'SU_MODE_EN',
+              'ZICNTR_EN', 'ZIHPM_NR', 'SINGLE_CYCLE_BRANCH')
 
 
 # ─── Metadata readers ─────────────────────────────────────────────────────────
@@ -222,15 +221,23 @@ def build_header(test, mode, variant_args, rtl_params, march_info, simulator, ti
 # ─── Main logic ───────────────────────────────────────────────────────────────
 
 def save_trace(test, mode, variant_args, compress, outdir, source,
-               score=None, score_metric=None, size_info=None, quiet=False):
-    """Read trace, prepend metadata header, write to named output file."""
+               score=None, score_metric=None, size_info=None, quiet=False,
+               rtl_params=None):
+    """Read trace, prepend metadata header, write to named output file.
+
+    rtl_params: the RTL parameter set the trace was produced with. Pass it
+    explicitly for a `-rtl_config` run: `./run` regenerates
+    arv_parameterization.v from the run_config.json defaults on exit, so
+    reading that file afterwards records the defaults, not the persona.
+    """
 
     if not os.path.exists(source):
         print(f'Error: source trace file not found: {source}', file=sys.stderr)
         return 1
 
     # Gather metadata
-    rtl_params = read_rtl_params('./arv_parameterization.v')
+    if rtl_params is None:
+        rtl_params = read_rtl_params('./arv_parameterization.v')
     march_info = read_march_info('./march_config.sh')
     tc_version = read_toolchain_version(march_info)
     simulator  = os.environ.get('VERILOG_SIMULATOR', 'iverilog')

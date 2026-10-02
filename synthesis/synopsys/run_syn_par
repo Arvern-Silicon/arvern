@@ -1,0 +1,141 @@
+#!/bin/bash
+#----------------------------------------------------------------------------
+#          _    _           Family:    aRVern System IPs
+#         / \__/ \          Module:    run_syn_par
+#        /   /\   \         --------------------------------------------
+#    ===/   /=========      Copyright: (c) 2026, aRVern-dev
+#      /   / RV \   \       Contact:   arvernsilicon@gmail.com
+#     /___/______\___\      GitHub:    https://github.com/Arvern-Silicon
+#
+# SPDX-License-Identifier: BSD-3-Clause
+# Full license text is available in the LICENSE file at the repository root.
+#----------------------------------------------------------------------------
+# Synthesize several sweep configs in parallel, each in its own copy of this
+# directory, so the per-run state (rtl_params.tcl, results/, WORK/, clog*) never
+# collides. Design Compiler is single-threaded here and the licence allows
+# concurrent dc_shell instances, so N workers run at close to N x the speed of
+# ./run_syn_d -rtl_config a,b,c,...
+#
+# Usage:
+#   ./run_syn_par -j N -rtl_config a,b,c,...      # same names/indices as run_syn_d
+#   ./run_syn_par -j N -rtl_sweep                 # every config of the sweep set
+#   ./run_syn_par -j N --sweep-mode ofat-light    # one named sweep mode
+#
+# Output is identical to a sequential run: each config's results/ is snapshotted
+# to ./results_sweep/<NN>_<label>/ or ./results_sweep/<label>/ by run_syn itself
+# (inside the worker copy), then moved here. Worker copies live in ../_par_job<k>/ and
+# are removed at the end; the per-config synthesis.log is kept in the snapshot.
+#
+# Limits: (1) never run this alongside a sequential ./run_syn_d sweep -- both
+# write results_sweep/, and killing a run_syn_d wrapper leaves its container
+# running; (2) each DC session (compile_ultra forks dcfarm children) needs
+# ~2 GB, and the Docker VM has what Docker Desktop allots it (7.6 GB here):
+# -j 2 for full-size configs, -j 4 only for light-sized ones. Exceeding it
+# shows up as "dcfarm: detected bad exit ... Fatal: Internal system error"
+# and rc=99 (no report) in the summary line.
+#----------------------------------------------------------------------------
+set -u
+cd "$(dirname "$0")"
+
+JOBS=2; CONFIGS=""; SWEEP=0; MODE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -j)            JOBS="$2"; shift 2 ;;
+        -j*)           JOBS="${1#-j}"; shift ;;
+        -rtl_config)   CONFIGS="$2"; shift 2 ;;
+        -rtl_sweep)    SWEEP=1; shift ;;
+        --sweep-mode)  MODE="$2"; shift 2 ;;
+        -h|--help)     sed -n '13,29p' "$0"; exit 0 ;;
+        *) echo "Error: unknown option '$1'" >&2; exit 1 ;;
+    esac
+done
+
+# Resolve the config list to one name per line.
+if [[ -n "$MODE" ]]; then
+    LIST=$(python3 - "$MODE" <<'EOF'
+import sys, json; sys.path.insert(0, '../../sim/rtl_sim/bin')
+from rtl_sweep_configs import sweepable_params, generate_configs
+p = sweepable_params(json.load(open('../../sim/rtl_sim/run/run_config.json'))['rtl_config'])
+mode = sys.argv[1]
+if mode in ('personas',):
+    for l, _ in generate_configs(p, mode)[1]: print(l.split(':', 1)[1])
+elif mode == 'ofat-light':
+    for l, _ in generate_configs(p, mode)[1]: print(l)
+else:
+    allc = generate_configs(p, 'all')[1]
+    want = {l for l, _ in generate_configs(p, mode)[1]}
+    for i, (l, _) in enumerate(allc):
+        if l in want: print(i + 1)
+EOF
+)
+elif [[ $SWEEP -eq 1 ]]; then
+    LIST=$(python3 ./gen_rtl_params.py --list-configs | grep -v '^#' | cut -f1)
+elif [[ -n "$CONFIGS" ]]; then
+    LIST=$(echo "$CONFIGS" | tr ',' '\n')
+else
+    echo "Error: give -rtl_config a,b,..., -rtl_sweep or --sweep-mode <mode>" >&2; exit 1
+fi
+LIST=$(echo "$LIST" | sed '/^$/d')
+TOTAL=$(echo "$LIST" | wc -l | tr -d ' ')
+echo "run_syn_par: $TOTAL configs, $JOBS workers  ($(date '+%H:%M'))"
+
+# One worker copy per job, as a SIBLING of this directory (../_par_job<k>) so
+# every ../../ relative path in run_syn / gen_rtl_params.py / read.tcl and the
+# docker mount resolve exactly as they do here. Contents: scripts + libraries +
+# alib cache; own rtl_params.tcl / results/ / WORK/.
+PAR=./_par; rm -rf "$PAR" ../_par_job*; mkdir -p "$PAR" ./results_sweep
+WD_CONT=$(grep -oE '^working_directory="[^"]+"' run_syn_d | head -1 | cut -d'"' -f2)
+[[ -z "$WD_CONT" ]] && { echo "Error: cannot find working_directory= in run_syn_d" >&2; exit 1; }
+WD_PARENT=$(dirname "$WD_CONT")
+for ((k = 0; k < JOBS; k++)); do
+    d=../_par_job$k
+    mkdir -p "$d"
+    cp ./*.tcl ./*.txt ./run_syn ./run_syn_d ./gen_rtl_params.py "$d/"
+    cp -r ./libraries "$d/"
+    [[ -d ./alib-52 ]] && cp -r ./alib-52 "$d/"
+    sed -i.bak "s|^working_directory=\"$WD_CONT\"|working_directory=\"$WD_PARENT/_par_job$k\"|" "$d/run_syn_d" && rm -f "$d/run_syn_d.bak"
+    grep -q "^working_directory=\"$WD_PARENT/_par_job$k\"" "$d/run_syn_d" || { echo "Error: worker $k: working_directory rewrite failed" >&2; exit 1; }
+done
+
+# Queue: each worker pops the next config under a lock, runs it in its copy,
+# then moves the snapshot up (run_syn writes results_sweep/ only for >1 entry,
+# so a single entry lands in results/ and is snapshotted here by label).
+QUEUE=$PAR/queue; echo "$LIST" > "$QUEUE"; : > "$PAR/done.log"
+worker() {
+    local k=$1 d=../_par_job$k cfg
+    while :; do
+        until mkdir "$PAR/queue.lock" 2>/dev/null; do sleep 0.2; done
+        cfg=$(head -n1 "$QUEUE"); sed -i.bak '1d' "$QUEUE"; rm -f "$QUEUE.bak"
+        rmdir "$PAR/queue.lock"
+        [[ -z "$cfg" ]] && break
+        local t0=$SECONDS
+        ( cd "$d" && ./run_syn_d -rtl_config "$cfg" > "./run_$k.log" 2>&1 )
+        local rc=$?
+        # Snapshot name: run_syn's own sanitised label for this config.
+        local label
+        label=$(grep -oE 'SYNTHESIS: sweep config .* \((.*)\)' "$d/run_$k.log" | head -1 | sed -E 's/.*\((.*)\)$/\1/')
+        [[ -z "$label" ]] && label="$cfg"
+        local san
+        san=$(echo "$label" | sed -e 's/[(),]//g' -e 's/[ /=:]/_/g')
+        local out
+        if [[ "$cfg" =~ ^[0-9]+$ ]]; then out=$(printf './results_sweep/%02d_%s' "$cfg" "$san"); else out="./results_sweep/$san"; fi
+        if [[ -f "$d/results/report.area_analysis.txt" ]]; then
+            rm -rf "$out"; mkdir -p "$out"; cp -r "$d/results/." "$out/"
+        else
+            mkdir -p "$out"; rc=${rc:-1}; [[ $rc -eq 0 ]] && rc=99   # no report -> failure
+        fi
+        cp "$d/run_$k.log" "$out/run_syn_par.log"
+        local gates
+        gates=$(grep -oE 'Total NAND2 equivalent:\s*[0-9]+' "$out/report.area_analysis.txt" 2>/dev/null | grep -oE '[0-9]+$')
+        local errs warns
+        errs=$(grep -cE '^Error' "$out/synthesis.log" 2>/dev/null); warns=$(grep -cE '^Warning' "$out/synthesis.log" 2>/dev/null)
+        printf '%-40s rc=%s  %6s gates  err=%s warn=%s  %dm%02ds  (job%d)\n' "$cfg" "$rc" "${gates:-?}" "${errs:-?}" "${warns:-?}" $(( (SECONDS - t0) / 60 )) $(( (SECONDS - t0) % 60 )) "$k" \
+            | tee -a "$PAR/done.log"
+    done
+}
+for ((k = 0; k < JOBS; k++)); do worker "$k" & done
+wait
+echo "run_syn_par: done ($(date '+%H:%M')); $(wc -l < "$PAR/done.log" | tr -d ' ')/$TOTAL configs, $(grep -c 'rc=0 ' "$PAR/done.log") ok"
+grep -v 'rc=0 ' "$PAR/done.log"
+cp "$PAR/done.log" ./results_sweep/run_syn_par.log
+rm -rf "$PAR" ../_par_job*

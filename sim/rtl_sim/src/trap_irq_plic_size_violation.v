@@ -26,7 +26,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -52,6 +52,20 @@ initial
       $display(" ====================================================================");
       $display("|             PHASE 1: word SW to priority[1] succeeds               |");
       $display(" ====================================================================");
+      @(probes_cpu.x31==32'h1E1E1E1E);
+      repeat(3) @(posedge free_clk);
+
+      begin : program_vector
+         reg [31:0] handler_addr;
+         handler_addr = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h18)];
+         if (handler_addr == 32'h0) begin
+            $display("ERROR: nmi_handler address not published %t ns", $time);
+            error = error + 1;
+         end else begin
+            $display("PASS:  nmi_vector programmed to 0x%h %t ns", handler_addr, $time);
+         end
+      end
+
       @(probes_cpu.x31==32'h11111111);
       repeat(3) @(posedge free_clk);
 
@@ -69,8 +83,8 @@ initial
       repeat(3) @(posedge free_clk);
 
       check_mem_value(`SPAD(32'h00), 32'h00000001);    // 1 trap fired
-      check_mem_value(`SPAD(32'h04), 32'h00000007);    // cause = 7 (SAF)
-      check_mem_value(`SPAD(32'h08), 32'h0C000004);    // mtval = PLIC_PRI1
+      check_mem_value(`SPAD(32'h04), 32'h80000003);    // mncause = data-bus error
+      check_mem_value(`SPAD(32'h08), 32'h0C000004);    // marv_eaddr = PLIC_PRI1
       $display("PASS:  byte store to PLIC priority register AHB-ERRORed and trapped %t ns",
                $time);
 
@@ -86,8 +100,8 @@ initial
       repeat(3) @(posedge free_clk);
 
       check_mem_value(`SPAD(32'h00), 32'h00000002);    // 2 traps total
-      check_mem_value(`SPAD(32'h0C), 32'h00000005);    // cause = 5 (LAF)
-      check_mem_value(`SPAD(32'h10), 32'h0C200000);    // mtval = PLIC_TH_M
+      check_mem_value(`SPAD(32'h0C), 32'h80000003);    // mncause = data-bus error
+      check_mem_value(`SPAD(32'h10), 32'h0C200000);    // marv_eaddr = PLIC_TH_M
       $display("PASS:  halfword load from PLIC threshold AHB-ERRORed and trapped %t ns",
                $time);
 
@@ -106,7 +120,12 @@ initial
       // PRIO_BITS=3 -> priority register holds the low 3 bits of 0x55 (= 0x5).
       // The bad byte SB in phase 2 was rejected before reaching the
       // register file, so the read-back must still show 0x5.
-      check_mem_value(`SPAD(32'h14), 32'h00000005);
+      check_mem_value(`SPAD(32'h14), 32'h00000005);   // priority field truncates 0x55 -> 5
+
+      // mcause 5/7 are RESERVED: no synchronous trap at all.
+      $display("");
+      $display("--- mtvec must NEVER be entered ---");
+      check_mem_value(`SPAD(32'h1C), 32'h00000000);
       $display("PASS:  PLIC priority[1] kept 0x5 -- bad-size write was rejected %t ns",
                $time);
 

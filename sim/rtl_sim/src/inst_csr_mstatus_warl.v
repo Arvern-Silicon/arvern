@@ -12,6 +12,10 @@
 // Description: mstatus SUM/MXR/TVM WARL CONFORMANCE
 //   Verifies WARL behavior of mstatus.SUM (bit 18), mstatus.MXR (bit 19),
 //   mstatus.TVM (bit 20), and the corresponding sstatus.SUM/MXR view.
+//
+//   SUM is read-only 0 here and MXR/TVM are writable -- the spec ties SUM to
+//   satp.MODE being read-only 0 (which it is: Bare-only stub), whereas MXR and
+//   TVM are only read-only 0 when S-mode itself is absent.
 //----------------------------------------------------------------------------
 
 `define LONG_TIMEOUT
@@ -22,7 +26,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 task check_bit;
    input  integer       address;
@@ -77,8 +81,12 @@ initial
       @(probes_cpu.x31==32'h22222222);
       repeat(3) @(posedge free_clk);
 
-      check_bit(`SPAD(32'h20), 18, 1'b1);   // mstatus.SUM
-      check_bit(`SPAD(32'h24), 18, 1'b1);   // sstatus.SUM
+      // SUM is hardwired 0, NOT writable: "SUM is read-only 0 if S-mode is not
+      // supported OR IF satp.MODE IS READ-ONLY 0", and aRVern's satp is a RAZ/WI
+      // Bare-only stub. The rule differs from MXR/TVM below, which are tied only
+      // to S-mode being supported. Writing 1 must therefore leave it 0.
+      check_bit(`SPAD(32'h20), 18, 1'b0);   // mstatus.SUM stays 0
+      check_bit(`SPAD(32'h24), 18, 1'b0);   // sstatus.SUM stays 0
 
 
       //=================================================================
@@ -113,7 +121,7 @@ initial
       $display("");
       $display(" PHASE 5: clear SUM/MXR/TVM");
       $display("Waiting for the firmware...");
-      @(probes_cpu.x31==32'hdeadbeef);
+      @(probes_cpu.x31==32'h55555555);
       repeat(3) @(posedge free_clk);
 
       check_bit(`SPAD(32'h50), 18, 1'b0);   // mstatus.SUM cleared
@@ -121,6 +129,27 @@ initial
       check_bit(`SPAD(32'h50), 20, 1'b0);   // mstatus.TVM cleared
       check_bit(`SPAD(32'h54), 18, 1'b0);   // sstatus.SUM cleared
       check_bit(`SPAD(32'h54), 19, 1'b0);   // sstatus.MXR cleared
+
+      //=================================================================
+      // PHASE 6: MPP WARL -- the reserved encoding 2'b10
+      //
+      // 2'b10 would select H-mode, which aRVern does not implement, so a
+      // write of it must WARL to a supported value. aRVern picks U (2'b00)
+      // to match sail-riscv: riscv-arch-test Sm_mcsr-00's cp_mcsrwalk
+      // clears mstatus bit 11 from MPP=M and compares the readback, so the
+      // choice is pinned by the reference and is not free to change.
+      //=================================================================
+      $display("");
+      $display(" PHASE 6: MPP WARL (reserved 2'b10)");
+      $display("Waiting for the firmware...");
+      @(probes_cpu.x31==32'hdeadbeef);
+      repeat(3) @(posedge free_clk);
+
+      check_bit(`SPAD(32'h60), 12, 1'b1);   // MPP = 2'b11 (M) to start
+      check_bit(`SPAD(32'h60), 11, 1'b1);
+
+      check_bit(`SPAD(32'h64), 12, 1'b0);   // reserved write WARL'd to 2'b00 (U)
+      check_bit(`SPAD(32'h64), 11, 1'b0);
 
 
       //=================================================================

@@ -191,6 +191,10 @@ handler_done:
 
     # Enable MSTATUS.MIE (bit 3)
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrsi 0x744, 8            # Smdbltrp: a trap in M-mode with NMIE=0 is an unexpected trap
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Initialize callee-saved registers to known pattern
@@ -261,43 +265,13 @@ store_misaligned:
 
 
     #=================================================================
-    # PHASE 5: Load access fault (MCAUSE=5, MTVAL=0x10000000)
+    # PHASES 5 & 6 (load / store ACCESS FAULT) REMOVED.
+    #
+    # Bus errors are RNMIs now (mncause=0x80000003), not mcause=5/7, and they
+    # do not write mtval -- the faulting address is captured in marv_eaddr.
+    # That reporting path is covered by trap_nmi_bus_error. mcause 5/7 are
+    # RESERVED and never raised, so there is nothing here to reinterpret.
     #=================================================================
-
-    li   t0, 0x10000000       # unmapped address
-
-load_fault:
-    lw   t1, 0(t0)            # load from unmapped address
-
-    # Handler advances MEPC by 4, returns here
-    lw   t0, 0x04(s1)
-    sw   t0, 0x50(s1)         # MCAUSE
-    lw   t0, 0x08(s1)
-    sw   t0, 0x54(s1)         # MTVAL
-    lw   t1, 0x54(s1)         # load-back
-
-    li   x31, 0x55555555
-
-
-    #=================================================================
-    # PHASE 6: Store access fault (MCAUSE=7, MTVAL=0x10000004)
-    #=================================================================
-
-    li   t0, 0x10000004       # unmapped address
-    li   t2, 0xDEADDEAD       # data to store
-
-store_fault:
-    sw   t2, 0(t0)            # store to unmapped address
-
-    # Handler advances MEPC by 4, returns here
-    lw   t0, 0x04(s1)
-    sw   t0, 0x60(s1)         # MCAUSE
-    lw   t0, 0x08(s1)
-    sw   t0, 0x64(s1)         # MTVAL
-    lw   t1, 0x64(s1)         # load-back
-
-    li   x31, 0x66666666
-
 
     #=================================================================
     # PHASE 7: EBREAK (MCAUSE=3, MTVAL=0)
@@ -312,7 +286,7 @@ store_fault:
     sw   t0, 0x74(s1)         # MTVAL
     lw   t1, 0x74(s1)         # load-back
 
-    li   x31, 0x77777777
+    li   x31, 0x66666666
 
 
     #=================================================================
@@ -328,7 +302,7 @@ store_fault:
     sw   t0, 0x84(s1)         # MTVAL
     lw   t1, 0x84(s1)         # load-back
 
-    li   x31, 0x88888888
+    li   x31, 0x77777777
 
 
     #=================================================================

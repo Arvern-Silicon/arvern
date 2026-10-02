@@ -25,13 +25,15 @@ CAPI=2:
 # ----------------------------------------------------------------------------
 
 name: arvern:cpu:arvern:1.0
-description: "arvern RV32I/E CPU core (M, B, C extensions; S/M/U privilege; Smrnmi NMI; Zicntr/Zihpm counters)."
+description: "arvern RV32I/E CPU core (M, B, C extensions; S/M/U privilege; Smrnmi NMI; Zicntr/Zihpm counters; RISC-V Debug 1.0 external debug)."
 
 filesets:
   rtl:
     file_type: verilogSource
     files:
       - rtl/verilog/arvern.v
+      - rtl/verilog/arv_dff.v
+      - rtl/verilog/arv_dff_sinit.v
       - rtl/verilog/arv_fetch.v
       - rtl/verilog/arv_decode.v
       - rtl/verilog/arv_uop_sequencer.v
@@ -41,6 +43,10 @@ filesets:
       - rtl/verilog/arv_csr_hpm.v
       - rtl/verilog/arv_csr_ids.v
       - rtl/verilog/arv_csr_traps.v
+      - rtl/verilog/arv_csr_debug.v
+      - rtl/verilog/arv_debug_trigger.v
+      - rtl/verilog/arv_debug_dm.v
+      - rtl/verilog/arv_debug_sba.v
       - rtl/verilog/arv_alu.v
       - rtl/verilog/arv_alu_muldiv.v
       - rtl/verilog/arv_load_store.v

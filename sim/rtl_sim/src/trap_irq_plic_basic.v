@@ -29,7 +29,7 @@ integer ahb_master;
 integer allow_peripheral_accesses;
 
 // Scratchpad byte->word index
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 //----------------------------------------------------------------------------
 // PLIC source auto-drop:

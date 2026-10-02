@@ -15,8 +15,16 @@
 .section .text
 .global main
 main:
-    jal t0, _random_irq_init    # Enable random IRQ injection (omit for trap_* tests)
+    jal t0, _random_irq_init    # Enable random IRQ injection (omit for trap_* tests -- see below)
     li  t0, 0
+
+    # Trap tests that install their own mtvec and skip _random_irq_init MUST
+    # run this boot sequence first (it is otherwise done inside _random_irq_init):
+    # mstatush.MDT resets to 1 and mnstatus.NMIE to 0, so the first M-mode trap
+    # would be classified as an unexpected trap and lock the core up.
+    # Arm NMIE first, then clear MDT -- in that order; MIE cannot be set while MDT=1.
+    #   csrsi 0x744, 8              # mnstatus.NMIE = 1
+    #   csrw  mstatush, x0          # mstatus.MDT   = 0
 
     # Initialize all registers to known values (e.g., 0xFFFFFFFF)
     li  x1, 0xFFFFFFFF

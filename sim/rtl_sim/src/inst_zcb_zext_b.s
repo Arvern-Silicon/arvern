@@ -13,6 +13,7 @@
 #----------------------------------------------------------------------------
 
 .section .text
+.option push
 .option norvc        # disable all compressed instructions in this section
 .global main
 
@@ -48,10 +49,11 @@ main:
     # Encoding: 100_111_rs1'/rd'[2:0]_11000_01
     # Implemented as: rd' = rd' AND 0x000000FF
     #-------------------------------------------------
-.option rvc          # enable compressed instructions
+.option pop          # enable compressed instructions
 
     # Backup original values to non-compressed registers before zero-extension
     # This allows verification that only lower byte is preserved
+.option push
 .option norvc
     addi x17, x8,  0    # Backup x8  = 0xFFFFFF00
     addi x18, x9,  0    # Backup x9  = 0x12345601
@@ -62,7 +64,7 @@ main:
     addi x23, x14, 0    # Backup x14 = 0x9999AAAA
     addi x24, x15, 0    # Backup x15 = 0x33335A5A
 
-.option rvc
+.option pop
     # Test C.ZEXT.B on all compressed registers
     c.zext.b  x8     # x8  = 0x00000000 (0x00 zero-extended)
     c.zext.b  x9     # x9  = 0x00000001 (0x01 zero-extended)
@@ -73,6 +75,7 @@ main:
     c.zext.b  x14    # x14 = 0x000000AA (0xAA zero-extended, NOT sign-extended!)
     c.zext.b  x15    # x15 = 0x0000005A (0x5A zero-extended)
 
+.option push
 .option norvc
 
     #-------------------------------------------------
@@ -82,16 +85,18 @@ main:
     # Test with zero (should remain zero)
     li  x8,  0xFFFFFFFF
     li  x1,  0xFFFFFFFF
-.option rvc
+.option pop
     c.zext.b  x8     # x8 = 0x000000FF (all 1s in byte)
+.option push
 .option norvc
     addi x1, x8, 0   # Backup result to x1
 
     # Test with 0x00000000 (should remain zero)
     li  x9,  0x00000000
     li  x2,  0x12345678
-.option rvc
+.option pop
     c.zext.b  x9     # x9 = 0x00000000
+.option push
 .option norvc
     addi x2, x9, 0   # Backup result to x2
 
@@ -99,36 +104,41 @@ main:
     li  x10, 0xABCDEF42
     li  x3,  0x11111111
     li  x4,  0x22222222
-.option rvc
+.option pop
     c.zext.b  x10    # x10 = 0x00000042 (first application)
+.option push
 .option norvc
     addi x3, x10, 0  # Backup first result
-.option rvc
+.option pop
     c.zext.b  x10    # x10 = 0x00000042 (second application - should be same)
+.option push
 .option norvc
     addi x4, x10, 0  # Backup second result
 
     # Test with alternating bit patterns
     li  x11, 0x5555A5A5
     li  x5,  0x33333333
-.option rvc
+.option pop
     c.zext.b  x11    # x11 = 0x000000A5
+.option push
 .option norvc
     addi x5, x11, 0  # Backup result to x5
 
     # Test with sequential bytes
     li  x12, 0x03020100
     li  x6,  0x44444444
-.option rvc
+.option pop
     c.zext.b  x12    # x12 = 0x00000000 (lower byte is 0x00)
+.option push
 .option norvc
     addi x6, x12, 0  # Backup result to x6
 
     # Test with negative-looking byte that should NOT become negative
     li  x13, 0x123456FF
     li  x7,  0x55555555
-.option rvc
+.option pop
     c.zext.b  x13    # x13 = 0x000000FF (NOT 0xFFFFFFFF!)
+.option push
 .option norvc
     addi x7, x13, 0  # Backup result to x7
 

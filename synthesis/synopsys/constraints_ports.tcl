@@ -97,6 +97,7 @@ set DATA_HSMODE_DLY       [expr ($CLOCK_PERIOD/100) * 30]
 set DATA_HTRANS_DLY       [expr ($CLOCK_PERIOD/100) * 30]
 set DATA_HWDATA_DLY       [expr ($CLOCK_PERIOD/100) * 30]
 set DATA_HWRITE_DLY       [expr ($CLOCK_PERIOD/100) * 30]
+set DATA_HMASTER_DLY      [expr ($CLOCK_PERIOD/100) * 30]
 
 
 set_input_delay $DATA_HRDATA_DLY                 -max -clock "hclk"   [get_ports data_hrdata_i]
@@ -136,6 +137,9 @@ set_output_delay 0                               -min -clock "hclk"   [get_ports
 set_output_delay $DATA_HWRITE_DLY     -add_delay -max -clock "hclk"   [get_ports data_hwrite_o]
 set_output_delay 0                               -min -clock "hclk"   [get_ports data_hwrite_o]
 
+set_output_delay $DATA_HMASTER_DLY    -add_delay -max -clock "hclk"   [get_ports data_hmaster_o]
+set_output_delay 0                               -min -clock "hclk"   [get_ports data_hmaster_o]
+
 
 #====================================#
 # INTERFACE TO CUSTOM CSR REGISTERS  #
@@ -168,11 +172,70 @@ set_output_delay $CCSR_WEN_DLY        -add_delay -max -clock "hclk"   [get_ports
 set_output_delay 0                               -min -clock "hclk"   [get_ports ccsr_wen_o]
 
 
+#====================================#
+# EXTERNAL DEBUG (DMI + status)      #
+#====================================#
+
+# DMI is an APB4 slave (PCLK=hclk, PRESETn=dbgresetn_i). The DTM master drives the
+# select/address/data inputs from its own registered outputs; the DM drives pready/
+# prdata/pslverr from registered flops (rsp_valid_q / rsp_data_q).
+# Inputs  (from the DTM master): psel/penable/paddr/pwrite/pwdata/pprot
+set DMI_IN_DLY          [expr ($CLOCK_PERIOD/100) * 50]
+
+# Outputs (to the DTM master): pready/prdata/pslverr
+set DMI_OUT_DLY         [expr ($CLOCK_PERIOD/100) * 40]
+set DBG_STATUS_DLY      [expr ($CLOCK_PERIOD/100) * 30]
+set DBG_NDMRESET_DLY    [expr ($CLOCK_PERIOD/100) * 40]
+
+
+set_input_delay $DMI_IN_DLY                      -max -clock "hclk"   [get_ports dmi_psel_i]
+set_input_delay 0                                -min -clock "hclk"   [get_ports dmi_psel_i]
+
+set_input_delay $DMI_IN_DLY                      -max -clock "hclk"   [get_ports dmi_penable_i]
+set_input_delay 0                                -min -clock "hclk"   [get_ports dmi_penable_i]
+
+set_input_delay $DMI_IN_DLY                      -max -clock "hclk"   [get_ports dmi_paddr_i]
+set_input_delay 0                                -min -clock "hclk"   [get_ports dmi_paddr_i]
+
+set_input_delay $DMI_IN_DLY                      -max -clock "hclk"   [get_ports dmi_pwrite_i]
+set_input_delay 0                                -min -clock "hclk"   [get_ports dmi_pwrite_i]
+
+set_input_delay $DMI_IN_DLY                      -max -clock "hclk"   [get_ports dmi_pwdata_i]
+set_input_delay 0                                -min -clock "hclk"   [get_ports dmi_pwdata_i]
+
+set_input_delay $DMI_IN_DLY                      -max -clock "hclk"   [get_ports dmi_pprot_i]
+set_input_delay 0                                -min -clock "hclk"   [get_ports dmi_pprot_i]
+
+
+set_output_delay $DMI_OUT_DLY         -add_delay -max -clock "hclk"   [get_ports dmi_pready_o]
+set_output_delay 0                               -min -clock "hclk"   [get_ports dmi_pready_o]
+
+set_output_delay $DMI_OUT_DLY         -add_delay -max -clock "hclk"   [get_ports dmi_prdata_o]
+set_output_delay 0                               -min -clock "hclk"   [get_ports dmi_prdata_o]
+
+set_output_delay $DMI_OUT_DLY         -add_delay -max -clock "hclk"   [get_ports dmi_pslverr_o]
+set_output_delay 0                               -min -clock "hclk"   [get_ports dmi_pslverr_o]
+
+
+set_output_delay $DBG_STATUS_DLY      -add_delay -max -clock "hclk"   [get_ports dbg_debug_mode_o]
+set_output_delay 0                               -min -clock "hclk"   [get_ports dbg_debug_mode_o]
+
+set_output_delay $DBG_STATUS_DLY      -add_delay -max -clock "hclk"   [get_ports dbg_halted_o]
+set_output_delay 0                               -min -clock "hclk"   [get_ports dbg_halted_o]
+
+set_output_delay $DBG_STATUS_DLY      -add_delay -max -clock "hclk"   [get_ports dbg_stoptime_o]
+set_output_delay 0                               -min -clock "hclk"   [get_ports dbg_stoptime_o]
+
+
+set_output_delay $DBG_NDMRESET_DLY    -add_delay -max -clock "hclk"   [get_ports dbg_ndmreset_o]
+set_output_delay 0                               -min -clock "hclk"   [get_ports dbg_ndmreset_o]
+
+
 #=========================#
 # REMAINING PORTS         #
 #=========================#
 
-set HCLK_EN_DLY         [expr ($CLOCK_PERIOD/100) * 50]
+set HCLK_EN_DLY         [expr ($CLOCK_PERIOD/100) * 35]
 
 set RESET_VECTOR_DLY    [expr ($CLOCK_PERIOD/100) * 20]
 
@@ -222,8 +285,6 @@ set STATIC_CFG_DLY      [expr ($CLOCK_PERIOD/100) * 40]
 set_input_delay $STATIC_CFG_DLY                  -max -clock "hclk"   [get_ports hartid_i]
 set_input_delay 0                                -min -clock "hclk"   [get_ports hartid_i]
 
-set_input_delay $STATIC_CFG_DLY                  -max -clock "hclk"   [get_ports nmi_vector_i]
-set_input_delay 0                                -min -clock "hclk"   [get_ports nmi_vector_i]
 
 
 #=================================#
@@ -274,23 +335,29 @@ set_output_delay 0                               -min -clock "hclk"   [get_ports
 #              -group_path FEEDTHROUGH_OTHER
 
 
-#=========================#
-# RESET PATH (hresetn_i)   #
-#=========================#
-# How hresetn_i is timed depends on the reset architecture (ASYNC_RST_EN, set in
+#===================================#
+# RESET PATHS (hresetn_i, dbgresetn_i) #
+#===================================#
+# How the resets are timed depends on the reset architecture (ASYNC_RST_EN, set in
 # rtl_params.tcl and sourced via read.tcl; defaults to async if not present):
 #   1 = asynchronous reset -> drives the flops' async clear/preset directly; its
 #       assertion isn't timed against hclk and its deassertion is synchronized
 #       outside the core, so it stays a false path.
 #   0 = synchronous reset  -> sampled on the hclk edge like any other synchronous
 #       input, so constrain it with an input delay and let STA time it.
+# dbgresetn_i is the Debug Module's reset (survives ndmreset; the DM/SBA flops use the
+# same ARST_EN style threaded from ASYNC_RST_EN), so it is timed identically to hresetn_i.
 set HRESETN_ASYNC 1
 if {[info exists RTL_PARAM_ASYNC_RST_EN]} { set HRESETN_ASYNC $RTL_PARAM_ASYNC_RST_EN }
 
 if {$HRESETN_ASYNC} {
     set_false_path -from [get_ports hresetn_i]
+    set_false_path -from [get_ports dbgresetn_i]
 } else {
     set HRESETN_DLY [expr ($CLOCK_PERIOD/100) * 40]
     set_input_delay $HRESETN_DLY                 -max -clock "hclk"   [get_ports hresetn_i]
     set_input_delay 0                            -min -clock "hclk"   [get_ports hresetn_i]
+
+    set_input_delay $HRESETN_DLY                 -max -clock "hclk"   [get_ports dbgresetn_i]
+    set_input_delay 0                            -min -clock "hclk"   [get_ports dbgresetn_i]
 }

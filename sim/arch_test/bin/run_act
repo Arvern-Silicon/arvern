@@ -1,0 +1,563 @@
+#!/usr/bin/env python3
+#----------------------------------------------------------------------------
+#          _    _           Family:    aRVern System IPs
+#         / \__/ \          Script:    run_act
+#        /   /\   \         --------------------------------------------
+#    ===/   /=========      Copyright: (c) 2026, aRVern-dev
+#      /   / RV \   \       Contact:   arvernsilicon@gmail.com
+#     /___/______\___\      GitHub:    https://github.com/Arvern-Silicon
+#
+# SPDX-License-Identifier: BSD-3-Clause
+# Full license text is available in the LICENSE file at the repository root.
+#----------------------------------------------------------------------------
+# Run generated RISC-V Architectural Certification Test ELFs on aRVern.
+#
+# Generation happens in Docker (bin/act_docker); this runs natively and needs
+# no container. Personas come from sim/rtl_sim/bin/rtl_sweep_configs.py so the
+# ACT flow and the synthesis / lint / regression sweeps cannot drift apart.
+#
+#   ./bin/run_act                        # default persona, every generated ELF
+#   ./bin/run_act Svbare_Smode           # one test by name
+#   ./bin/run_act InterruptsS-00 S-00    # several
+#   ./bin/run_act 'Zcb*' -p ultra        # globs work too
+#   ./bin/run_act -p light -j 8
+#   ./bin/run_act Svbare_Smode --trace   # + asphalt.log (--vcd for waveforms)
+#   ./bin/run_act --list-tests           # what is available to run
+#   ./bin/run_act --list-personas
+#----------------------------------------------------------------------------
+
+import argparse
+import fnmatch
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+ARCH_TEST_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT     = os.path.dirname(os.path.dirname(ARCH_TEST_DIR))
+RTL_SIM_BIN   = os.path.join(REPO_ROOT, 'sim', 'rtl_sim', 'bin')
+RTL_SIM_RUN   = os.path.join(REPO_ROOT, 'sim', 'rtl_sim', 'run')
+BENCH_DIR     = os.path.join(REPO_ROOT, 'bench', 'verilog')
+
+sys.path.insert(0, RTL_SIM_BIN)
+from rtl_sweep_configs import PERSONAS                      # noqa: E402
+from test_config import TestConfig                          # noqa: E402
+import flatten_filelist                                     # noqa: E402
+
+# The ACT image is one contiguous rwx blob in the executable SRAM. Both values
+# are elaboration-time overrides -- see arvern/*/link.ld, which must agree.
+SRAM_X_BASE  = 0x80000000
+SRAM_X_SIZE  = 1024 * 1024
+
+# Generous: a single ACT test is far longer than a directed rtl_sim test, and a
+# real hang is reported as a timeout rather than being allowed to run forever.
+TIMEOUT_CYCLES = 2000000
+
+
+
+
+
+# Swap the real ahb_aclint for the behavioural reference-platform model.
+ACLINT_MODEL = os.environ.get('ARV_ACT_ACLINT_MODEL', '1') not in ('0', '', 'no')
+
+
+
+
+# Wall-clock ceiling per test. The S/U privileged tests run 10x longer than the
+# instruction ones, so this is deliberately loose -- it exists to catch a real
+# hang, not to bound normal runtime.
+SIM_TIMEOUT_S = 3600
+
+# Verilator by default: the privileged ACT tests run to millions of cycles and
+# are simply not tractable under iverilog. VERILOG_SIMULATOR=iverilog still works
+# and is useful when a Verilator-specific elaboration issue needs ruling out.
+SIMULATOR = os.environ.get('VERILOG_SIMULATOR', 'verilator')
+
+# Name the per-test copy of the simulation binary the same either way, so the
+# rest of the flow does not care which simulator produced it.
+SIM_BIN = 'simv'
+
+PERSONA_PARAMS = dict(PERSONAS)
+
+# ACT-ONLY CONFIGURATIONS -- verification configs, deliberately NOT products.
+#
+# PERSONAS is the integrator-facing ladder; these exist only to move the CSR
+# EXISTENCE MAP somewhere the ladder never goes, which is where Sm_mcsr-00 has
+# leverage (it sweeps the whole M-CSR space against the reference and is what
+# caught the medeleg/mideleg/mcounteren/menvcfg absence bugs).
+#
+# They are excluded from the synthesis and lint sweeps -- nothing outside this
+# file reads them.
+ACT_ONLY_CONFIGS = [
+    # M-mode only WITH PMP. Every persona correlates SU_MODE_EN with PMP_NR
+    # (light/classic have neither, performance/ultra have both), so pmpcfg* /
+    # pmpaddr* / mseccfg present while the whole 0x100/0x140/0x180 bank and the
+    # medeleg / mideleg / mcounteren / menvcfg carve-outs are absent has never
+    # been run. Also exercises the Smepmp MML rules with no S or U mode for them
+    # to apply to. Classic plus PMP.
+    ("m-pmp", dict(
+        ASYNC_RST_EN=1,
+        RV32E_EN=0, M_EXTENSION=2, MUL_TYPE=1, DIV_TYPE=3,
+        B_EXTENSION=1, C_EXTENSION=1,
+        SU_MODE_EN=0, DEBUG_EN=0, DM_TRIGGER_NR=0, ZICNTR_EN=1, ZIHPM_NR=0, CCSR_EN=0,
+        PMP_NR=8,
+        SINGLE_CYCLE_BRANCH=1,
+    )),
+    # S+U WITHOUT Zicntr. ZICNTR_EN=0 appears only in light, which is M-only, so
+    # mcounteren existing (because U-mode does) while the counters it gates do
+    # not has never been checked against the reference -- arv_csr_top.v ties the
+    # gating signal to 3'b111 in that case. Performance minus the counters.
+    ("su-nocntr", dict(
+        ASYNC_RST_EN=1,
+        RV32E_EN=0, M_EXTENSION=2, MUL_TYPE=1, DIV_TYPE=1,
+        B_EXTENSION=4, C_EXTENSION=2,
+        SU_MODE_EN=1, DEBUG_EN=0, DM_TRIGGER_NR=0, ZICNTR_EN=0, ZIHPM_NR=0, CCSR_EN=0,
+        PMP_NR=4,
+        SINGLE_CYCLE_BRANCH=1,
+    )),
+]
+PERSONA_PARAMS.update(dict(ACT_ONLY_CONFIGS))
+
+# PMP entry count for arch-test elaboration.
+#
+# The published personas ship 4 or 8 writable entries; the suite is here to
+# validate the PMP implementation itself, so it elaborates all 16. The upstream
+# tests need that: they hardcode region indices up to 7, and place their
+# permissive background rule at NUM_USABLE_PMP_ENTRIES-1. Since PMP resolves
+# lowest-numbered-match-wins, a background below the region under test masks it
+# entirely, and entries past the writable count never take the rule at all.
+#
+# PERSONAS is left alone -- this applies to the ACT build only, and each
+# persona's UDB config carries the matching NUM_USABLE_PMP_ENTRIES.
+ACT_PMP_NR = 16
+
+
+def act_params(persona):
+    """Persona parameters as the arch-test build elaborates them."""
+    params = dict(PERSONA_PARAMS[persona])
+    if params.get('PMP_NR', 0):
+        params['PMP_NR'] = ACT_PMP_NR
+    return params
+
+
+def toolchain_prefix():
+    """Reuse the toolchain the rtl_sim flow resolved, rather than guessing."""
+    cfg = TestConfig(os.path.join(RTL_SIM_RUN, 'run_config.json'))
+    tc = cfg._config.get('toolchain', {})
+    profile = tc.get('profiles', {}).get(tc.get('active', 'xpacks'), {})
+    return profile.get('prefix', 'riscv-none-elf')
+
+
+def build_design(persona, sim_dir, trace=False, vcd=False, sig=None, quiet=False):
+    """Elaborate the testbench once per persona; every ELF then reuses it."""
+    os.makedirs(sim_dir, exist_ok=True)
+
+    # Core configuration for this persona, via the same generator the rtl_sim
+    # flow uses (tb_arvern.v `includes arv_parameterization.v).
+    from runsim import generate_parameterization_file
+    cfg = TestConfig(os.path.join(RTL_SIM_RUN, 'run_config.json'))
+    generate_parameterization_file(cfg, act_params(persona),
+                                   output_dir=sim_dir, quiet=True)
+
+    shutil.copy(os.path.join(ARCH_TEST_DIR, 'src', 'stimulus_act.v'),
+                os.path.join(sim_dir, 'stimulus.v'))
+
+    # The testbench $readmemh's ROM unconditionally; the ACT image lives in SRAM
+    # and the reset vector points there, so ROM only needs to exist.
+    with open(os.path.join(sim_dir, 'pmem.mem'), 'w') as f:
+        f.write('00000000\n')
+
+    # submit.f compiles ./probes_variables.v, normally generated per test from
+    # the firmware symbol table so directed tests can watch C variables by name.
+    # ACT tests are self-checking and never probe symbols, so empty bodies are
+    # the right stub -- and keep elaboration test-independent, which is what
+    # lets one build serve every ELF. tb_arvern.v instantiates all three.
+    with open(os.path.join(sim_dir, 'probes_variables.v'), 'w') as f:
+        f.write('// Stub -- ACT tests probe no firmware symbols. See bin/run_act.\n')
+        for mod in ('probes_var', 'probes_stack', 'probes_stack_alt'):
+            f.write(f'module {mod};\nendmodule\n')
+
+    # instruction_pc_checker is instantiated unconditionally but defined under
+    # `ifdef CHECKER_EN, so the define is required to elaborate. It is inert
+    # here: it only checks PCs inside ROM and silently skips everything else
+    # (instruction_pc_checker.v:138), and ACT code executes from SRAM.
+    open(os.path.join(sim_dir, 'checker_data.mem'), 'w').close()
+
+    submit = os.path.normpath(os.path.join(BENCH_DIR, 'submit.f'))
+    flat   = os.path.join(sim_dir, 'submit_sim.f')
+    flatten_filelist.emit_raw(submit, flatten_filelist.process_filelist(submit), flat)
+
+    # menvcfgh.DTE is pinned to 0 BY DEFAULT -- see the block comment in
+    # src/stimulus_act.v. sail_riscv 0.13.1 cannot model Ssdbltrp at all (the
+    # upstream CTP carries it only as commented-out placeholders), so the
+    # reference behaves as a DTE=0 machine and reports menvcfgh.DTE as RAZ.
+    # aRVern implements ratified Ssdbltrp, so without this every Sm_mcsr-00 run
+    # stops at cp_mcsr_access/menvcfgh_csrrw1 and the rest of that test's
+    # coverage never executes -- which is how the mstatus.MPP WARL divergence
+    # went unnoticed until it was pinned.
+    #
+    # REMOVE THIS DEFAULT once the suite models Ssdbltrp: it is a workaround for
+    # a reference-model gap, and while it is on, aRVern's double-trap behaviour
+    # is NOT being tested by the suite. Set ARV_ACT_FORCE_DTE0=0 to run the core
+    # as built.
+    # SU_MODE_EN=0 personas have no g_ssdbltrp block at all, so the force's
+    # hierarchical path would not elaborate. Ssdbltrp is gated by S-mode, not by
+    # NMI -- see the ARV_ACT_FORCE_DTE0 block in stimulus_act.v.
+    if (PERSONA_PARAMS[persona].get('SU_MODE_EN')
+            and os.environ.get('ARV_ACT_FORCE_DTE0', '1') not in ('0', '', 'no')):
+        defines_extra = ['ARV_ACT_FORCE_DTE0']
+    else:
+        defines_extra = []
+    # Map the executable SRAM at address 0 (bench/verilog/ahb_bus_system.v).
+    # Off for the directed suite, whose bus-error tests need address 0 unmapped;
+    # on here because pmpsm_cfg_A_tor_zero writes and then executes there.
+    defines_extra = defines_extra + ['ARV_TB_SRAM_LO_X_EN']
+    defines = defines_extra + ['SEED=1', 'HIPERF', 'STD_MODE', 'CHECKER_EN', 'NO_TIMEOUT',
+               f'ACT_TIMEOUT_CYCLES={TIMEOUT_CYCLES}']
+    # NMI_EN=1 personas only: see the ARV_ACT_FORCE_NMIE1 block in stimulus_act.v.
+    # Smrnmi resets mnstatus.NMIE to 0 and that gates EVERY interrupt, so without
+    # this the ACT tests -- which know nothing about Smrnmi and never set it --
+    # record zero traps in every Interrupts* test. Set ARV_ACT_FORCE_NMIE1=0 to
+    # run the core as built -- which is also the cheapest way to reach the
+    # framework's trap-signature-offset diagnostic path on purpose.
+    if (PERSONA_PARAMS[persona].get('NMI_EN')
+            and os.environ.get('ARV_ACT_FORCE_NMIE1', '1') not in ('0', '', 'no')):
+        defines.append('ARV_ACT_FORCE_NMIE1')
+    if ACLINT_MODEL:
+        # Behavioural reference-platform ACLINT instead of the real IP: MTIME
+        # paced by retired instructions, zero-latency MTIP, no CDC. See
+        # bench/verilog/aclint_model.v. An arch-test run then covers the CORE's
+        # trap/interrupt architecture and says nothing about ahb_aclint, which
+        # is what its own block regression and the trap_irq_aclint_* tests are for.
+        defines.append('ARV_TB_ACLINT_MODEL')
+    # The reference platform's CLINT has no access control -- policing MMIO
+    # privilege is PMP's job there, and aRVern implements no PMP. The testbench
+    # SoC otherwise instantiates an M-only ACLINT, which makes InterruptsU-00's
+    # cp_user_mti_* coverpoints take a load access fault on the U-mode MTIME read
+    # (mtval = 0x02004008) that the reference completes. MMIO access control is a
+    # platform property, not an ISA one, so matching the reference platform here
+    # relaxes nothing about the core.
+    defines.append('ARV_TB_IO_PRIV_CHECK_EN=0')
+    # Both off by default: a full sweep is 152 tests. Kept separate because the
+    # cost is wildly different -- asphalt.log is a line per instruction, while a
+    # VCD of a multi-million-cycle test runs to many gigabytes.
+    if not trace:
+        defines.append('NOTRACE')
+    if not vcd:
+        defines.append('NODUMP')
+    # Signature bounds come from the ELF's own symbols, so the dump covers
+    # exactly the region sail_riscv_sim --test-signature writes.
+    if sig:
+        defines += [f'ACT_SIG_BEGIN={sig[0]}', f'ACT_SIG_END={sig[1]}']
+
+    params = {'SRAM_X_SIZE': str(SRAM_X_SIZE),
+              # Sized literal: a bare decimal is a 33-bit signed constant and the
+              # tools then warn about pruning a high bit off a 32-bit port.
+              'RESET_VECTOR': f"32'h{SRAM_X_BASE:08X}"}
+
+    if SIMULATOR == 'verilator':
+        # --binary/--timing mirror sim/rtl_sim/bin/rtlsim.sh, which is the known-good
+        # configuration for this design. Verilator wants defines attached (-DNAME).
+        # --x-initial unique + the +verilator+rand+reset+1 plusarg below start every flop at 1,
+        # so the reset nets see a real falling edge (a two-state simulator starting at 0
+        # would never fire the asynchronous reset) -- the same as rtlsim.sh.
+        cmd = ['verilator', '--binary', '--timing', '--x-initial', 'unique', '-Wno-fatal',
+               '--top', 'tb_arvern', '-f', flat]
+        cmd += [f'-D{d}' for d in defines]
+        cmd += [f'-G{k}={v}' for k, v in params.items()]
+        if vcd:
+            cmd.append('--trace')
+        built = os.path.join(sim_dir, 'obj_dir', 'Vtb_arvern')
+    else:
+        cmd = ['iverilog', '-o', SIM_BIN, '-s', 'tb_arvern', '-c', flat]
+        for k, v in params.items():
+            cmd += ['-P', f'tb_arvern.{k}={v}']
+        for d in defines:
+            cmd += ['-D', d]
+        built = os.path.join(sim_dir, SIM_BIN)
+
+    r = subprocess.run(cmd, cwd=sim_dir, capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(built):
+        sys.stderr.write(r.stdout + r.stderr)
+        raise SystemExit(f"{SIMULATOR} build failed for persona '{persona}'")
+
+    # Expose the binary under one name regardless of simulator.
+    canonical = os.path.join(sim_dir, SIM_BIN)
+    if os.path.realpath(built) != os.path.realpath(canonical):
+        if os.path.lexists(canonical):
+            os.unlink(canonical)
+        os.symlink(os.path.relpath(built, sim_dir), canonical)
+
+    if not quiet:
+        print(f"Elaborated tb_arvern for persona '{persona}' ({SIMULATOR})")
+
+
+def run_one(elf, sim_dir, work_dir, prefix):
+    """ELF -> ihex -> image -> simulate. Returns (name, ok, detail, seconds).
+
+    The elapsed time covers the whole attempt, not just vvp: for a failure in
+    objcopy or ihex2mem the number is meant to show the test barely ran.
+    """
+    name  = os.path.basename(elf)[:-4]
+    start = time.monotonic()
+    os.makedirs(work_dir, exist_ok=True)
+
+    # Each worker needs its own cwd: the stimulus $readmemh's ./act_image.mem,
+    # and vvp resolves it relative to the working directory.
+    # Re-point rather than skip when the link already exists: os.path.lexists is
+    # true for a *dangling* symlink too, so a guard on it alone silently keeps a
+    # stale target (e.g. after the tree is moved) and the run fails with no
+    # verdict instead of an obvious error.
+    for artifact in (SIM_BIN, 'pmem.mem'):
+        link   = os.path.join(work_dir, artifact)
+        target = os.path.join(sim_dir, artifact)
+        if os.path.lexists(link) and os.path.realpath(link) != os.path.realpath(target):
+            os.unlink(link)
+        if not os.path.lexists(link):
+            os.symlink(target, link)
+
+    ihex = os.path.join(work_dir, 'act.ihex')
+    r = subprocess.run([f'{prefix}-objcopy', '-O', 'ihex', elf, ihex],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return (name, False, 'objcopy failed: ' + r.stderr.strip()[:120],
+                time.monotonic() - start)
+
+    r = subprocess.run([sys.executable, os.path.join(RTL_SIM_BIN, 'ihex2mem.py'),
+                        '-i', ihex, '-o', os.path.join(work_dir, 'act_image.mem'),
+                        '-s', str(SRAM_X_SIZE), '-b', str(SRAM_X_BASE)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return (name, False, 'ihex2mem failed: ' + r.stderr.strip()[:120],
+                time.monotonic() - start)
+
+    # The privileged tests are an order of magnitude heavier than the
+    # instruction ones (Sm_mcsr alone takes tens of thousands of traps), so the
+    # ceiling is generous. Catching the timeout matters more than its value: an
+    # uncaught TimeoutExpired propagates out of the future and takes the whole
+    # run down, losing every other result along with it.
+    try:
+        # Verilator produces a native executable; iverilog needs the vvp runtime.
+        sim_cmd = ([f'./{SIM_BIN}', '+verilator+rand+reset+1'] if SIMULATOR == 'verilator'
+                   else ['vvp', SIM_BIN])
+        r = subprocess.run(sim_cmd, cwd=work_dir, capture_output=True,
+                           text=True, timeout=SIM_TIMEOUT_S)
+        out = r.stdout + r.stderr
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or '') + (e.stderr or '') if isinstance(e.stdout, str) else ''
+        with open(os.path.join(work_dir, 'sim.log'), 'w') as f:
+            f.write(out + f'\n*** killed after {SIM_TIMEOUT_S}s wall clock ***\n')
+        return (name, False, f'simulation exceeded {SIM_TIMEOUT_S}s',
+                time.monotonic() - start)
+    with open(os.path.join(work_dir, 'sim.log'), 'w') as f:
+        f.write(out)
+
+    secs = time.monotonic() - start
+    if 'SIMULATION PASSED' in out:
+        return (name, True, '', secs)
+    # LAST match, not the first: the verdict is printed at the end of the run,
+    # while informational ACT: lines can appear earlier (and reporting one of
+    # those as the failure reason is actively misleading).
+    m = re.findall(r'^ACT: (.*)$', out, re.M)
+    return (name, False, m[-1] if m else 'no verdict in log', secs)
+
+
+def link_artifact(target, link_path):
+    """Expose a WORK/ artifact at run/ via a relative symlink.
+
+    Same idiom as runsim.py:867 -- symlinking at start rather than moving at the
+    end keeps the artifact reachable mid-run (live VCD reload, Ctrl+C leaves
+    partial data behind) and makes run/ browsable the way sim/rtl_sim/run is.
+    """
+    try:
+        if os.path.lexists(link_path):
+            os.unlink(link_path)
+        os.symlink(os.path.relpath(target, start=os.path.dirname(link_path)),
+                   link_path)
+    except OSError:
+        pass
+
+
+def fmt_secs(s):
+    """Compact, fixed-ish width: sub-minute as seconds, beyond that as m:ss."""
+    return f'{s:.1f}s' if s < 60 else f'{int(s) // 60}m{int(s) % 60:02d}s'
+
+
+def main():
+    t_start = time.monotonic()
+    ap = argparse.ArgumentParser(description='Run ACT ELFs on aRVern.')
+    ap.add_argument('-p', '--persona', default='performance')
+    ap.add_argument('tests', nargs='*',
+                    help='test name(s) or glob(s) to run; default is every ELF')
+    ap.add_argument('-f', '--filter', default='*', help='glob on ELF basename')
+    ap.add_argument('-j', '--jobs', type=int, default=1)
+    ap.add_argument('--list-personas', action='store_true')
+    ap.add_argument('--list-tests', action='store_true',
+                    help='list the generated tests for this persona and exit')
+    ap.add_argument('--trace', action='store_true',
+                    help='emit asphalt.log, the per-instruction trace (single test)')
+    ap.add_argument('--vcd', action='store_true',
+                    help='emit tb_arvern.vcd -- large, only for short tests')
+    ap.add_argument('--sigdump', action='store_true',
+                    help='dump the DUT ELF signature region to act_signature.txt, '
+                         'for diffing against the reference .sig -- but see the '
+                         'SELF-CHECK caveat below: on these builds it is NOT a '
+                         'DUT-vs-reference diff (single test)')
+    args = ap.parse_args()
+
+    if args.list_personas:
+        for label, _ in PERSONAS:
+            print(label)
+        for label, _ in ACT_ONLY_CONFIGS:
+            print(f"{label}  (arch-test only)")
+        return 0
+
+    if args.persona not in PERSONA_PARAMS:
+        sys.exit(f"unknown persona '{args.persona}' "
+                 f"(see --list-personas)")
+
+    elf_root = os.path.join(ARCH_TEST_DIR, 'run', 'GENERATED', f'arvern-{args.persona}', 'elfs')
+    if not os.path.isdir(elf_root):
+        sys.exit(f"no generated ELFs at {elf_root}\n"
+                 f"Generate them first:\n"
+                 f"  ./run --gen -p {args.persona}")
+
+    # Positional names are the common case -- ./run Svbare_Smode -- mirroring
+    # sim/rtl_sim/run/run. -f stays as the explicit-glob form. Names are matched
+    # as globs too, so a partial name like 'Interrupts*' works either way.
+    patterns = args.tests if args.tests else [args.filter]
+    # ALWAYS the DUT ELF, including for --sigdump. The .sig.elf sitting in build/
+    # is NOT a DUT binary: riscv_arch_test.h:11-14 includes rvmodel_macros.h and
+    # then, when RVTEST_SELFCHECK is undefined, lets sail_macros.h OVERRIDE it, so
+    # that build targets the REFERENCE platform -- its CLINT and interrupt-generator
+    # accesses go to Sail's addresses (e.g. 0x0C000004 for SET_MEXT_INT rather than
+    # our 0x10040008). Running it on aRVern makes every such device access land
+    # nowhere: interrupts are never raised, the test spins, and a signature diff
+    # shows differences that say nothing about the DUT. It is the reference input
+    # of the two-stage pipeline (build_plan.py:157):
+    #     test.S -> test.sig.elf -> test.sig (ref model) -> test.results -> test.elf
+    #
+    # SELF-CHECK CAVEAT -- --sigdump CANNOT diff the DUT against the reference on
+    # these builds. RVTEST_SELFCHECK links the .results table into .data AT
+    # begin_signature (PROGBITS, pre-initialised) and the handlers COMPARE IN PLACE
+    # against it, advancing a write pointer without ever storing a signature. So the
+    # dumped region always reproduces the reference .sig exactly -- a tautology, not
+    # a passing comparison. (Mtrap_sig/Strap_sig are not record arrays either: word 0
+    # of each is that pointer.) The authoritative oracle on a self-check build is the
+    # RVCP report the test prints -- expected/actual, XEPC, XCAUSE, XTVAL, XSTATUS.
+    # --sigdump remains useful only for reading a region back, e.g. to decode where a
+    # reported expected value sits in the table.
+    suffix = '.elf'
+    elfs = sorted(os.path.join(dp, f)
+                  for dp, _, fs in os.walk(elf_root)
+                  for f in fs
+                  if f.endswith(suffix)
+                  and any(fnmatch.fnmatch(f[:-len(suffix)], p) for p in patterns))
+    if not elfs:
+        sys.exit(f"no ELFs matching {patterns} under {elf_root}\n"
+                 f"(names are the ELF basename, e.g. Svbare_Smode or InterruptsS-00)")
+
+    if args.list_tests:
+        # Grouped by suite directory, which is how the upstream tree is laid out
+        # and how you would usually want to select a batch.
+        groups = {}
+        for elf in elfs:
+            suite = os.path.relpath(os.path.dirname(elf), elf_root)
+            groups.setdefault(suite, []).append(os.path.basename(elf)[:-4])
+        for suite in sorted(groups):
+            print(f"{suite}  ({len(groups[suite])})")
+            for name in groups[suite]:
+                print(f"    {name}")
+        print(f"\n{len(elfs)} test(s) for persona '{args.persona}'")
+        return 0
+
+    run_dir = os.path.join(ARCH_TEST_DIR, 'run')
+    sim_dir = os.path.join(run_dir, 'WORK', f'arvern-{args.persona}')
+    sig_bounds = None
+    if args.sigdump:
+        prefix0 = toolchain_prefix()
+        nm = subprocess.run([f'{prefix0}-nm', elfs[0]], capture_output=True, text=True)
+        syms = {ln.split()[2]: ln.split()[0]
+                for ln in nm.stdout.splitlines() if len(ln.split()) == 3}
+        lo_sym, hi_sym = 'begin_signature', 'end_signature'
+        try:
+            sig_bounds = (f"32'h{syms[lo_sym]}", f"32'h{syms[hi_sym]}")
+        except KeyError as e:
+            sys.exit(f'ELF has no symbol {e}')
+        print(f"signature region: {lo_sym} 0x{syms[lo_sym]} .. "
+              f"{hi_sym} 0x{syms[hi_sym]}")
+
+    build_design(args.persona, sim_dir, trace=args.trace, vcd=args.vcd,
+                 sig=sig_bounds)
+    for art in ('simv', 'submit_sim.f', 'arv_parameterization.v', 'stimulus.v'):
+        link_artifact(os.path.join(sim_dir, art), os.path.join(run_dir, art))
+    prefix = toolchain_prefix()
+
+    print(f"Running {len(elfs)} test(s), persona '{args.persona}', "
+          f"{args.jobs} worker(s)\n")
+
+    results = []
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        # One directory per test, not per worker: the pool gives no guarantee
+        # about which tasks are in flight together, so reusing slots by index
+        # would let two concurrent runs share an act_image.mem.
+        futures = [pool.submit(run_one, elf, sim_dir,
+                               os.path.join(sim_dir, 'tests',
+                                            os.path.basename(elf)[:-4]),
+                               prefix)
+                   for elf in elfs]
+        for fut in futures:
+            name, ok, detail, secs = fut.result()
+            results.append((name, ok, detail, secs))
+            # flush: Python block-buffers stdout when it is a file, which
+            # otherwise leaves a redirected progress log empty until the end.
+            # Progress counter: futures are consumed in submission order, so this
+            # is "how many of the suite are done", not a worker index.
+            print(f"{len(results):>4}/{len(elfs)}  "
+                  f"{'PASS' if ok else 'FAIL'}  {fmt_secs(secs):>8}  {name}"
+                  f"{'  -- ' + detail if detail else ''}", flush=True)
+
+    # A single test is a debugging run, so show its log rather than making the
+    # user go find it -- the ACT failure report (RVCP:) is the most useful thing
+    # the suite produces and is otherwise invisible.
+    if len(elfs) == 1:
+        only_log = os.path.join(sim_dir, 'tests',
+                                os.path.basename(elfs[0])[:-4], 'sim.log')
+        if os.path.exists(only_log):
+            print(f"\n----- {os.path.basename(elfs[0])[:-4]} sim.log "
+                  f"{'-' * 28}")
+            with open(only_log, errors='replace') as f:
+                sys.stdout.write(f.read())
+            print('-' * 60)
+
+    # A single-test run behaves like sim/rtl_sim/run: its log lands in run/
+    # directly. For a full sweep that would be meaningless, so the per-test
+    # directories under WORK/ stay the place to look.
+    if len(elfs) == 1:
+        only = os.path.basename(elfs[0])[:-4]
+        for art in ('sim.log', 'asphalt.log', 'tb_arvern.vcd'):
+            src_art = os.path.join(sim_dir, 'tests', only, art)
+            if os.path.exists(src_art):
+                link_artifact(src_art, os.path.join(run_dir, art))
+
+    wall   = time.monotonic() - t_start
+    failed = [r for r in results if not r[1]]
+    # Sum of per-test times, which exceeds wall clock when -j > 1 -- both are
+    # worth seeing: one says how long you waited, the other how much work ran.
+    cpu    = sum(r[3] for r in results)
+    print(f"\n{'=' * 62}\n  persona '{args.persona}': "
+          f"{len(results) - len(failed)}/{len(results)} passed"
+          f"   wall {fmt_secs(wall)}, test-time {fmt_secs(cpu)}\n{'=' * 62}")
+
+    if failed:
+        print("\nFailures:")
+        for name, _, detail, secs in failed:
+            print(f"  {fmt_secs(secs):>8}  {name}  {detail}")
+    return 1 if failed else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

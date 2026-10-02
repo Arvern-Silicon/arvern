@@ -157,8 +157,15 @@ handler_done:
     la   t0, trap_handler
     csrw mtvec, t0
 
+    # Smdbltrp boot rule: arm NMIE, then clear MDT (both reset to 1/0 the wrong way
+    # for a plain M-mode trap: with MDT=1 a trap is 'unexpected' -> critical error).
+    csrsi 0x744, 8
+    csrw  mstatush, x0
     # Enable MSTATUS.MIE
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Initialize callee-saved registers for preservation check

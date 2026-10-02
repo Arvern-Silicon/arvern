@@ -13,6 +13,7 @@
 #----------------------------------------------------------------------------
 
 .section .text
+.option push
 .option norvc        # disable all compressed instructions in this section
 .global main
 
@@ -74,7 +75,7 @@ main:
     # Offset range: 0 to 3 (2-bit unsigned)
     # Encoding: 100_000_rs1'[2:0]_imm[0:1]_rd'[2:0]_00
     #-------------------------------------------------
-.option rvc          # enable compressed instructions
+.option pop          # enable compressed instructions
 
     # Test SET 1: Load all 4 bytes from SRAM+0 using x8 as base
     c.lbu  x9,  0(x8)   # x9  = 0x000000DD  <--  SRAM+0 (byte 0)
@@ -82,6 +83,7 @@ main:
     c.lbu  x11, 2(x8)   # x11 = 0x000000BB  <--  SRAM+2 (byte 2)
     c.lbu  x12, 3(x8)   # x12 = 0x000000AA  <--  SRAM+3 (byte 3)
 
+.option push
 .option norvc
     # Backup first set of loads to x17-x20
     addi x17, x9,  0    # Backup x9  = 0xDD
@@ -91,12 +93,13 @@ main:
 
     # Test SET 2: Load bytes from SRAM+4 using x9 as base
     addi  x9, x29, 4    # x9 = SRAM base + 4
-.option rvc
+.option pop
     c.lbu  x10, 0(x9)   # x10 = 0x00000044  <--  SRAM+4 (byte 0)
     c.lbu  x11, 1(x9)   # x11 = 0x00000033  <--  SRAM+5 (byte 1)
     c.lbu  x12, 2(x9)   # x12 = 0x00000022  <--  SRAM+6 (byte 2)
     c.lbu  x13, 3(x9)   # x13 = 0x00000011  <--  SRAM+7 (byte 3)
 
+.option push
 .option norvc
     # Backup second set of loads to x21-x24
     addi x21, x10, 0    # Backup x10 = 0x44
@@ -106,12 +109,13 @@ main:
 
     # Test SET 3: Load bytes from SRAM+8 using x10 as base
     addi  x10, x29, 8   # x10 = SRAM base + 8
-.option rvc
+.option pop
     c.lbu  x11, 0(x10)  # x11 = 0x00000088  <--  SRAM+8  (byte 0)
     c.lbu  x12, 1(x10)  # x12 = 0x00000077  <--  SRAM+9  (byte 1)
     c.lbu  x13, 2(x10)  # x13 = 0x00000066  <--  SRAM+10 (byte 2)
     c.lbu  x14, 3(x10)  # x14 = 0x00000055  <--  SRAM+11 (byte 3)
 
+.option push
 .option norvc
     # Backup third set of loads to x25-x28
     addi x25, x11, 0    # Backup x11 = 0x88
@@ -121,12 +125,13 @@ main:
 
     # Test SET 4: Load bytes from SRAM+12 using x11 as base
     addi  x11, x29, 12  # x11 = SRAM base + 12
-.option rvc
+.option pop
     c.lbu  x12, 0(x11)  # x12 = 0x000000CC  <--  SRAM+12 (byte 0)
     c.lbu  x13, 1(x11)  # x13 = 0x000000BB  <--  SRAM+13 (byte 1)
     c.lbu  x14, 2(x11)  # x14 = 0x000000AA  <--  SRAM+14 (byte 2)
     c.lbu  x15, 3(x11)  # x15 = 0x00000099  <--  SRAM+15 (byte 3)
 
+.option push
 .option norvc
     # Backup fourth set of loads to x1-x4
     addi x1, x12, 0     # Backup x12 = 0xCC
@@ -136,12 +141,13 @@ main:
 
     # Test SET 5: Load bytes from SRAM+16 using x12 as base
     addi  x12, x29, 16  # x12 = SRAM base + 16
-.option rvc
+.option pop
     c.lbu  x13, 0(x12)  # x13 = 0x000000EF  <--  SRAM+16 (byte 0)
     c.lbu  x14, 1(x12)  # x14 = 0x000000BE  <--  SRAM+17 (byte 1)
     c.lbu  x15, 2(x12)  # x15 = 0x000000AD  <--  SRAM+18 (byte 2)
     c.lbu  x8,  3(x12)  # x8  = 0x000000DE  <--  SRAM+19 (byte 3)
 
+.option push
 .option norvc
     # Backup fifth set of loads to x5-x7, x30
     addi x5,  x13, 0    # Backup x13 = 0xEF
@@ -151,12 +157,13 @@ main:
 
     # Test SET 6: Load bytes from SRAM+20 using x13 as base
     addi  x13, x29, 20  # x13 = SRAM base + 20
-.option rvc
+.option pop
     c.lbu  x14, 0(x13)  # x14 = 0x000000BE  <--  SRAM+20 (byte 0)
     c.lbu  x15, 1(x13)  # x15 = 0x000000BA  <--  SRAM+21 (byte 1)
     c.lbu  x8,  2(x13)  # x8  = 0x000000FE  <--  SRAM+22 (byte 2)
     c.lbu  x9,  3(x13)  # x9  = 0x000000CA  <--  SRAM+23 (byte 3)
 
+.option push
 .option norvc
 
     #-------------------------------------------------

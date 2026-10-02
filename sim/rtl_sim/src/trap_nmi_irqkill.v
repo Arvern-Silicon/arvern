@@ -15,7 +15,7 @@
 //   radix-2 DIV — operation killed immediately, NMI handler
 //   entered without waiting. After mnret, DIV restarts and
 //   completes with the correct result.
-//   Phase 2: irqkill disabled (irqkill_cfg=0x0). NMI fires during another
+//   Phase 2: irqkill disabled (marv_ctl=0x0). NMI fires during another
 //   33-cycle DIV — NMI is held off until completion, then taken.
 //   DIV result is still correct.
 //----------------------------------------------------------------------------
@@ -30,7 +30,7 @@ integer allow_peripheral_accesses;
 
 // Scratchpad word address offset (byte address / 4)
 // SRAM base is 0x80000000, word-addressed starting at 0
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -76,7 +76,6 @@ initial
             $display("PASS:  nmi_handler_addr stored by firmware: 0x%h %t ns", handler_addr, $time);
          end
 
-         nmi_vector = handler_addr;
       end
 
       // Verify scratchpad counters are zeroed before any NMI fires
@@ -89,7 +88,7 @@ initial
 
       //=================================================================
       // PHASE 1: NMI kills in-progress DIV (irqkill enabled, default)
-      // irqkill_cfg = 0x7 (default): bit[0]=1 => muldiv kill active.
+      // marv_ctl = 0x7 (default): bit[0]=1 => muldiv kill active.
       // Firmware signals 0x12121212 immediately before the div.
       // Testbench asserts NMI for 3 cycles — the hardware should abort
       // the running division and enter the NMI handler without waiting
@@ -125,7 +124,7 @@ initial
 
       //=================================================================
       // PHASE 2: NMI deferred until DIV completes (irqkill disabled)
-      // Firmware wrote 0x0 to irqkill_cfg before this phase.
+      // Firmware wrote 0x0 to marv_ctl before this phase.
       // Firmware signals 0x23232323 immediately before the div.
       // Testbench asserts NMI for 3 cycles — the hardware must NOT kill
       // the division; the NMI is held pending until the div result is

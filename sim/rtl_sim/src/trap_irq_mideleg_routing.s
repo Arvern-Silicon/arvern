@@ -23,6 +23,15 @@
 #   (verifies MSI is NOT cross-masked by an unrelated mideleg bit)
 #   Phase 4: mideleg.STI=1 + assert MTI (HW pin) -> trap cause 7 (M-mode)
 #   (verifies MTI is NOT cross-masked by an unrelated mideleg bit)
+#   Phase 5: mideleg.SEI=0 + irq_s_external pin, M-mode MIE=1 -> cause 9 (M),
+#   mcause = 0x80000009, mepc inside the spin loop
+#   Phase 6: same from S-mode (mstatus.SIE=1) -> still M, MPP=S, SIE untouched
+#   Priv 3.1.9: "An interrupt i will trap to M-mode ... if ... (c) if register
+#   mideleg exists, bit i is not set in mideleg."
+#
+#   Scratch: 0x10/0x14/0x18 full mcause/mepc/mstatus of the last M trap;
+#   phase 5 copy 0x40 mcause 0x44 mepc 0x48/0x4C spin bounds;
+#   phase 6 copy 0x50 mcause 0x54 mepc 0x58 mstatus 0x5C/0x60 spin bounds.
 #
 #   Synchronisation invariants:
 #   - MIE stays 1 throughout the test; mie.{XIE} bit is set/unset per phase
@@ -39,6 +48,8 @@
 .equ COUNT_OFFSET,    0x00
 .equ LAST_CAUSE_OFF,  0x04
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 main:
@@ -51,12 +62,21 @@ main:
     la   t0, m_handler
     csrw mtvec, t0
 
+    /* Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+       resets to 0 -- boot code must set mnstatus.NMIE=1
+       before any ordinary interrupt can be delivered. Smrnmi is
+       unconditional. */
+    csrsi 0x744, 8              /* mnstatus.NMIE = 1 */
+
     csrw mideleg, zero
     csrw mie,     zero
     li   t0, ((1 << 1) | (1 << 5) | (1 << 9))   /* SSIP, STIP, SEIP-sw */
     csrc mip, t0                                /* clear sticky bits */
 
     /* Enable MIE -- stays 1 for the whole test; per-phase enable is via mie */
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrsi mstatus, 0x8
 
     li   x31, 0xFFFFFFFF
@@ -171,11 +191,107 @@ phase4_done:
 
     li   x31, 0x44444444
 
+    /* ===================================================================== */
+    /* Phase 5: mideleg.SEI=0 + irq_s_external pin -> cause 9 (M), from M     */
+    /* ===================================================================== */
+    csrw mideleg, zero
+    li   t0, (1 << 9)              /* SEIE */
+    csrw mie, t0
+
+    lw   t1, COUNT_OFFSET(s1)
+    la   t0, phase5_sync
+    sw   t0, 0x48(s1)
+    la   t0, phase5_hi
+    sw   t0, 0x4C(s1)
+
+    li   x31, 0x50505050           /* signal TB: assert irq_s_external */
+phase5_sync:
+
+    li   t4, 10000
+phase5_lo:
+    lw   t5, COUNT_OFFSET(s1)
+    bne  t5, t1, phase5_done
+    addi t4, t4, -1
+    bnez t4, phase5_lo
+phase5_hi:
+phase5_done:
+
+    lw   t2, COUNT_OFFSET(s1)
+    sub  t2, t2, t1
+    csrr t3, mscratch              /* x28 = mcause (passed via CSR) */
+    lw   t0, 0x10(s1)
+    sw   t0, 0x40(s1)
+    lw   t0, 0x14(s1)
+    sw   t0, 0x44(s1)
+
+    li   x31, 0x55555555
+
+    /* ===================================================================== */
+    /* Phase 6: same interrupt taken from S-mode, mideleg.SEI=0 -> still M   */
+    /* ===================================================================== */
+    PMP_ALLOW_ALL
+    la   t0, s_bad_handler
+    csrw stvec, t0
+    csrw mideleg, zero
+    la   t0, phase5_lo             /* poison the record: must be rewritten */
+    sw   t0, 0x14(s1)
+    sw   zero, 0x10(s1)
+    sw   zero, 0x18(s1)
+    la   t0, phase6_sync
+    sw   t0, 0x5C(s1)
+    la   t0, phase6_hi
+    sw   t0, 0x60(s1)
+    li   t0, 0x1800
+    csrc mstatus, t0               /* MPP = 00 */
+    li   t0, 0x0800
+    csrs mstatus, t0               /* MPP = 01 (S) */
+    csrsi mstatus, 0x2             /* SIE = 1: must survive the M trap */
+    la   t0, s_mode_entry
+    csrw mepc, t0
+    li   t0, (1 << 9)              /* SEIE */
+    csrw mie, t0
+    mret                           /* drop into S-mode */
+
+s_mode_entry:
+    lw   t1, COUNT_OFFSET(s1)
+
+    li   x31, 0x60606060           /* signal TB: assert irq_s_external (in S) */
+phase6_sync:
+
+    li   t4, 10000
+phase6_lo:
+    lw   t5, COUNT_OFFSET(s1)
+    bne  t5, t1, phase6_done
+    addi t4, t4, -1
+    bnez t4, phase6_lo
+phase6_hi:
+phase6_done:
+
+    lw   t2, COUNT_OFFSET(s1)
+    sub  t2, t2, t1
+    lw   t3, 0x10(s1)              /* mscratch is not readable from S */
+    andi t3, t3, 0x1F
+    lw   t0, 0x10(s1)
+    sw   t0, 0x50(s1)
+    lw   t0, 0x14(s1)
+    sw   t0, 0x54(s1)
+    lw   t0, 0x18(s1)
+    sw   t0, 0x58(s1)
+    lw   zero, 0x58(s1)
+
+    li   x31, 0x66666666
+
     li   x31, 0xdeadbeef
 
 end_of_test:
     nop
     j end_of_test
+
+/* S-mode trap vector: mideleg is 0, so nothing may land here */
+.align 2
+s_bad_handler:
+    li   x31, 0xBADBAD09
+    j    s_bad_handler
 
 
 /*===========================================================================*/
@@ -203,6 +319,11 @@ m_handler:
        strict program-order semantics so main's subsequent csrr is guaranteed
        to see this value. */
     csrr t1, mcause
+    sw   t1, 0x10(t0)              /* full mcause, mepc, mstatus (phases 5/6) */
+    csrr t2, mepc
+    sw   t2, 0x14(t0)
+    csrr t2, mstatus
+    sw   t2, 0x18(t0)
     andi t1, t1, 0x1F
     csrw mscratch, t1
 
@@ -223,6 +344,8 @@ m_handler:
     beq  t1, t2, clear_stip
     li   t2, 7
     beq  t1, t2, mask_mtie
+    li   t2, 9
+    beq  t1, t2, mask_seie
     j    h_done
 
 clear_ssip:
@@ -242,6 +365,11 @@ mask_msie:
 
 mask_mtie:
     li   t1, (1 << 7)
+    csrc mie, t1
+    j    h_done
+
+mask_seie:
+    li   t1, (1 << 9)
     csrc mie, t1
     j    h_done
 

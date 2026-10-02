@@ -16,7 +16,7 @@
 //   integer ahb_master;
 //   integer allow_peripheral_accesses;
 //
-//   `define SPAD(byte_off)  (byte_off/4)
+//   `define SPAD(byte_off)  ((byte_off)/4)
 //
 //   initial
 //   begin
@@ -57,7 +57,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin

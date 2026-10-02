@@ -14,7 +14,7 @@
 //   - NMI handler entered when nmi_i asserts
 //   - mnepc saved (address of interrupted instruction)
 //   - mnstatus at entry: NMIE=0 (bit3), MNPP=11 (bits12:11) = M-mode
-//   - mncause = 0x80000000 at NMI entry (bit[31]=1, cause=0)
+//   - mncause = 0x80000002 at NMI entry (bit[31]=1, cause=2 = RNMI input pin)
 //   - mnret resumes execution at mnepc
 //   - NMIE=1 after mnret (mnstatus_after_ret checked after handler returns)
 //----------------------------------------------------------------------------
@@ -29,7 +29,7 @@ integer allow_peripheral_accesses;
 
 // Scratchpad word address offset (byte address / 4)
 // SRAM base is 0x80000000, word-addressed starting at 0
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -75,7 +75,6 @@ initial
             $display("PASS:  nmi_handler_addr stored by firmware: 0x%h %t ns", handler_addr, $time);
          end
 
-         nmi_vector = handler_addr;
       end
 
       // Verify scratchpad is otherwise zeroed
@@ -170,10 +169,10 @@ initial
          end
       end
 
-      // Check mncause = 0x80000000: bit[31]=1 (interrupt), bits[30:0]=0 (NMI cause code 0)
+      // Check mncause = 0x80000002: bit[31]=1 (interrupt), cause 2 = external RNMI input pin
       $display("");
       $display("--- MNCAUSE at NMI entry (expect 0x80000000: interrupt bit set, cause=0) ---");
-      check_mem_value(`SPAD(32'h0C), 32'h80000000);
+      check_mem_value(`SPAD(32'h0C), 32'h80000002);
 
       // Check mnstatus after mnret: NMIE=1 (bit3 set by mnret)
       $display("");

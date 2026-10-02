@@ -24,7 +24,7 @@ integer allow_peripheral_accesses;
 reg [31:0] p1_inhibited_count;
 reg [31:0] p2_running_count;
 
-`define SPAD(byte_off) (byte_off/4)
+`define SPAD(byte_off) ((byte_off)/4)
 
 initial
    begin

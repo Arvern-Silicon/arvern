@@ -166,6 +166,7 @@ _start:
 
     # Store nmi_handler address for testbench to configure nmi_vector
     la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
     sw   t0, 0x14(s1)
 
     # Install trap handler for regular exceptions and IRQs
@@ -212,6 +213,9 @@ p1_poll:
     csrs mie, t0
 
     # Enable MSTATUS.MIE (bit 3; fits in 5-bit)
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, 8
 
     # Signal: ready for testbench to assert NMI + irq_m_timer simultaneously

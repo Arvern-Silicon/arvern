@@ -23,7 +23,7 @@ Signal values are shown as hex for buses, 0/1 for 1-bit signals.
 Usage:
   python3 asphalt_annotate.py asphalt.log tb_arvern.vcd signal1 signal2 ... [options]
   python3 asphalt_annotate.py asphalt.log tb_arvern.vcd irq_software_i \\
-      mstatus_mie trap_pending_o trap_taken --cycles 400:600
+      mstatus_mie trap_pending trap_taken --cycles 400:600
   python3 asphalt_annotate.py asphalt.log tb_arvern.vcd irq_detect \\
       irq_suppress_post_mret --cycles 540:640 --clk-period 10000
 """

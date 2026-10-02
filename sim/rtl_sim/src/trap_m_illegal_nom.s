@@ -91,6 +91,10 @@ trap_handler:
     la   t0, trap_handler
     csrw mtvec, t0
 
+    # Smdbltrp boot rule: arm NMIE, then clear MDT (both reset to 1/0 the wrong way
+    # for a plain M-mode trap: with MDT=1 a trap is 'unexpected' -> critical error).
+    csrsi 0x744, 8
+    csrw  mstatush, x0
     # Seed values that must be preserved across each illegal trap.
     li   a0, 0x12345678        # rs1 for all ops
     li   a1, 0x87654321        # rs2 for all ops

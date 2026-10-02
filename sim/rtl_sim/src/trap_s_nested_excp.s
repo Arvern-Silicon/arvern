@@ -24,6 +24,16 @@
 #   Expected post-fix: the illegal inst is delegated to S-mode handler.
 #   Expected pre-fix : the illegal inst goes to M-mode handler.
 #
+#   Ssdbltrp update: hardware sets sstatus.SDT (bit 24) on EVERY trap taken
+#   into S-mode (interrupts included). With menvcfgh.DTE=1 (reset default) a
+#   nested trap delivered to S while SDT=1 would double-trap to M (mcause=16).
+#   The spec-correct re-entrancy pattern for a handler that tolerates nested
+#   traps is to clear SDT after its state save -- this test now does exactly
+#   that in the S-IRQ handler, preserving its horizontal-delegation purpose.
+#   As a bonus, the handler snapshots sstatus at entry so the testbench can
+#   verify HW set SDT on an INTERRUPT entry (the dbltrp suite only covers
+#   exception entries).
+#
 #   Scratchpad layout (base 0x80000000):
 #   0x00: m_trap_count       (M-mode trap counter)
 #   0x04: m_last_cause       (last MCAUSE)
@@ -34,7 +44,11 @@
 #   0x18: s_irq_done         (set to 0xAA when s_irq_handler returns past
 #   the illegal instruction)
 #   0x1C: result             (0xAA = excp delegated; 0xBB = forced to M)
+#   0x20: IRQ's sepc save slot
+#   0x24: sstatus snapshot at S-IRQ handler entry (bit 24 = SDT, expect 1)
 #----------------------------------------------------------------------------
+
+.include "firmware_config.inc"
 
 .section .text
 .global main
@@ -116,6 +130,11 @@ s_irq_path:
     # for the outer sret to return to s_main.
     sw   t1, 0x20(s1)              # IRQ's sepc
 
+    # Ssdbltrp: snapshot sstatus at IRQ-handler entry -- hardware must have
+    # set SDT (bit 24) on this S-mode INTERRUPT entry. Testbench checks it.
+    csrr t2, sstatus
+    sw   t2, 0x24(s1)
+
     lw   t2, 0x0C(s1)
     addi t2, t2, 1
     sw   t2, 0x0C(s1)
@@ -123,6 +142,16 @@ s_irq_path:
     # Disable SIE.STIE so the timer doesn't refire after sret
     li   t3, 0x20
     csrc sie, t3
+
+    # Ssdbltrp: S trap entry sets sstatus.SDT; clear it after state save to
+    # re-enable horizontal delegation (re-entrancy contract).
+    # NOTE: deliberately back-to-back with the trapping instruction below --
+    # Zicsr requires CSR writes to be visible in program order, so the very
+    # next instruction's trap routing MUST observe SDT=0 and delegate
+    # horizontally to S (no double trap). Known RTL stale-SDT window: see
+    # triage report (fails back-to-back, passes with >=1 spacer instruction).
+    li   t3, 0x01000000
+    csrc sstatus, t3
 
     # ---- Trigger nested illegal instruction inside the S-IRQ handler ----
 illegal_nested:
@@ -158,6 +187,7 @@ s_handler_done:
     .align 4
 _start:
     li   sp, 0x80010000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000
 
     # Zero scratchpad
@@ -170,12 +200,19 @@ _start:
     sw   t0, 0x14(s1)
     sw   t0, 0x18(s1)
     sw   t0, 0x1C(s1)
+    sw   t0, 0x20(s1)
+    sw   t0, 0x24(s1)
 
     # Install M and S handlers (direct mode)
     la   t0, m_handler
     csrw mtvec, t0
     la   t0, s_handler
     csrw stvec, t0
+
+    # Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+    # resets to 0, so boot code must set mnstatus.NMIE=1 before any
+    # ordinary interrupt can be delivered. Smrnmi is unconditional.
+    csrsi 0x744, 8              # mnstatus.NMIE = 1
 
     # Delegate S-timer (mideleg[5]) and illegal-instruction (medeleg[2])
     li   t0, 0x20
@@ -201,6 +238,9 @@ _start:
     li   t0, 0x1800
     csrc mstatus, t0
     li   t0, 0x0800
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
     li   t0, 0x80
     csrs mstatus, t0

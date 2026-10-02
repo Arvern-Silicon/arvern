@@ -28,6 +28,8 @@
 #   post-fix the mideleg-gated write-side blocks them.
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -87,6 +89,7 @@ _trap_done:
 
 _start:
     li   sp, 0x8000F000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000           # scratchpad base
 
     # Zero scratchpad
@@ -118,6 +121,9 @@ _start:
     li   t0, 0x1800
     csrc mstatus, t0                    # clear MPP
     li   t0, 0x0800
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0                    # MPP=01 (S)
     li   t0, 0x80
     csrc mstatus, t0                    # clear MPIE (so MIE stays 0 on return)

@@ -25,7 +25,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -57,7 +57,6 @@ initial
             $display("ERROR: nmi_handler addr is 0 %t ns", $time);
             error = error + 1;
          end
-         nmi_vector = handler_addr;
       end
 
 

@@ -45,6 +45,9 @@ main:
 
     /* Global MIE on */
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     li   x31, 0xFFFFFFFF             /* TB sync: setup complete */

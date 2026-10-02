@@ -118,8 +118,22 @@ XPROD = [
     # CSR/counter/NMI/custom cluster is absent while the datapath still
     # sources events/traps into it -- a config no ofat (others=rich) nor
     # either homogeneous corner (corner-LO also strips M+C) ever visits.
-    ("IMC-lean",     {"B_EXTENSION": 0, "NMI_EN": 0, "ZICNTR_EN": 0,
+    ("IMC-lean",     {"B_EXTENSION": 0, "ZICNTR_EN": 0,
                       "ZIHPM_NR": 0, "CCSR_EN": 0}),
+    # External debug present on the SMALLEST core. DEBUG_EN auto-sweeps via
+    # corners/ofat, but because its run_config default is 1, every ofat:X=v
+    # already carries debug-ON-with-rich-defaults and corner-HI is debug+all-max;
+    # the one debug x features point NOTHING reaches is debug ON while every
+    # surrounding feature is stripped (corner-LO/-RVE both have debug OFF). This
+    # exercises the full DM/DMI/SBA/debug-CSR cluster (arv_debug_dm.v,
+    # arv_debug_sba.v, arv_csr_debug.v + the id_excp_ebreak_nodbg debug-entry
+    # path) against the RV32E 16-register file (abstract GPR access into
+    # arv_int_registers RV32E_MODE), with NO multi-cycle MUL/DIV/UOP to halt-drain
+    # and M-only dcsr.prv (SU_MODE_EN=0) -- the lean-cluster insurance analogue of
+    # IMC-lean, but for the debug subsystem. = corner-LO-RVE + DEBUG_EN=1.
+    ("DEBUG-lean",   {"DEBUG_EN": 1, "DM_TRIGGER_NR": 1, "RV32E_EN": 1, "M_EXTENSION": 0,
+                      "C_EXTENSION": 0, "B_EXTENSION": 0, "SU_MODE_EN": 0, "ZICNTR_EN": 0, "ZIHPM_NR": 0,
+                      "CCSR_EN": 0}),
 ]
 
 # ---------------------------------------------------------------------------
@@ -139,33 +153,40 @@ XPROD = [
 PERSONAS = [
     # "Light" — smallest viable usable CPU: RV32E + Zmmul (slow mul, no
     # divider) + Zca (cheap compressed for code size), no B-ext, no
-    # counters, no NMI, no custom CSR, **M-mode only** (SU_MODE_EN=0:
-    # S+U gated out — sret/sfence.vma trap as illegal, S-mode CSRs RAZ/WI,
-    # mideleg/medeleg WI, mstatus.MPP forced to M).
+    # counters, no custom CSR, **M-mode only** (SU_MODE_EN=0: S+U gated
+    # out — sret traps as illegal, the S-mode CSRs and mideleg/medeleg/
+    # mcounteren/menvcfg are absent (illegal-instruction), mstatus.MPP
+    # forced to M).
     ("light", dict(
         ASYNC_RST_EN=1,
         RV32E_EN=1, M_EXTENSION=1, MUL_TYPE=3, DIV_TYPE=3,
         B_EXTENSION=0, C_EXTENSION=1,
-        NMI_EN=0, SU_MODE_EN=0, ZICNTR_EN=0, ZIHPM_NR=0, CCSR_EN=0,
+        SU_MODE_EN=0, DEBUG_EN=0, DM_TRIGGER_NR=0, ZICNTR_EN=0, ZIHPM_NR=0, CCSR_EN=0,
+        PMP_NR=0,
         SINGLE_CYCLE_BRANCH=1,
     )),
-    # "Classic" — well-balanced MCU baseline (matches the arvern.v
-    # module-declaration defaults): RV32I + single-cycle Zmmul + Zbb + Zca +
-    # Zicntr + M+S+U. The confident default-choice config integrators reach
-    # for when no specific constraint dominates — the "smart middle" of the
-    # ladder.
+    # "Classic" — well-balanced MCU baseline: RV32I + full M (single-cycle
+    # multiplier, radix-2 divider) + Zbb + Zca + Zicntr, **M-mode only**.
+    # The confident default-choice config integrators reach for when no
+    # specific constraint dominates — the "smart middle" of the ladder.
+    #
+    # M-only deliberately: S+U without PMP is trap delegation, not isolation,
+    # so privilege modes and containment arrive together at "performance".
+    # The area that buys goes into a divider instead, which an MCU baseline
+    # wants far more than privilege modes it cannot enforce.
     ("classic", dict(
         ASYNC_RST_EN=1,
-        RV32E_EN=0, M_EXTENSION=1, MUL_TYPE=1, DIV_TYPE=3,
+        RV32E_EN=0, M_EXTENSION=2, MUL_TYPE=1, DIV_TYPE=3,
         B_EXTENSION=1, C_EXTENSION=1,
-        NMI_EN=0, SU_MODE_EN=1, ZICNTR_EN=1, ZIHPM_NR=0, CCSR_EN=0,
+        SU_MODE_EN=0, DEBUG_EN=0, DM_TRIGGER_NR=0, ZICNTR_EN=1, ZIHPM_NR=0, CCSR_EN=0,
+        PMP_NR=0,
         SINGLE_CYCLE_BRANCH=1,
     )),
     # "Performance" — perf-pure compute target: RV32IM + 1-cycle MUL +
     # fastest divider (radix-8, 12-cycle) + full B (Zbb/Zba/Zbs/Zbc) +
     # Zca+Zcb (compressed base + byte/half-word memops, c.mul, c.zext/sext;
     # all decode-only, no UOP sequencer) + Zicntr. NO Zcmp/Zcmt (those
-    # carry a UOP sequencer with real area cost), no NMI, no Zihpm, no
+    # carry a UOP sequencer with real area cost), no Zihpm, no
     # CCSR — every knob set to maximise per-MHz throughput, nothing for
     # SoC integration features. Compare against Ultra to isolate the
     # area + code-size cost of feature-completeness while holding the
@@ -174,27 +195,175 @@ PERSONAS = [
         ASYNC_RST_EN=1,
         RV32E_EN=0, M_EXTENSION=2, MUL_TYPE=1, DIV_TYPE=1,
         B_EXTENSION=4, C_EXTENSION=2,
-        NMI_EN=0, SU_MODE_EN=1, ZICNTR_EN=1, ZIHPM_NR=0, CCSR_EN=0,
+        SU_MODE_EN=1, DEBUG_EN=0, DM_TRIGGER_NR=0, ZICNTR_EN=1, ZIHPM_NR=0, CCSR_EN=0,
+        PMP_NR=4,
         SINGLE_CYCLE_BRANCH=1,
     )),
     # "Ultra" — feature-complete tape-out target: everything Performance
-    # has + full C (Zca/Zcb/Zcmp/Zcmt for code density), Smrnmi NMI for
-    # safety-critical wakeup, Zihpm for production telemetry. CCSR left
+    # has + full C (Zca/Zcb/Zcmp/Zcmt for code density) and Zihpm for
+    # production telemetry. CCSR left
     # OFF (aRVern-specific opt-in extension; integrators turn it on when
     # they have a use). Same perf engine as Performance (1-cycle MUL,
     # radix-8 DIV, full B) so the Ultra↔Performance comparison answers
     # "what does the SoC-integration feature load cost in gates and code
-    # size?" without confusing perf and feature axes.
+    # size?" without confusing perf and feature axes. External debug is
+    # kept on the orthogonal axis: the debug-inclusive build is the
+    # "ultra-dbg" twin below (DEBUG_EN=1 + full 8-trigger Sdtrig file).
     ("ultra", dict(
         ASYNC_RST_EN=1,
         RV32E_EN=0, M_EXTENSION=2, MUL_TYPE=1, DIV_TYPE=1,
         B_EXTENSION=4, C_EXTENSION=4,
-        NMI_EN=1, SU_MODE_EN=1, ZICNTR_EN=1, ZIHPM_NR=4, CCSR_EN=0,
+        SU_MODE_EN=1, DEBUG_EN=0, DM_TRIGGER_NR=0, ZICNTR_EN=1, ZIHPM_NR=4, CCSR_EN=0,
+        PMP_NR=8,
         SINGLE_CYCLE_BRANCH=1,
     )),
 ]
 
-SWEEP_MODES = ("all", "corners", "ofat", "xprod", "default", "personas")
+# ---------------------------------------------------------------------------
+# Debug-enabled twins of the four base personas. The base personas above are
+# deliberately debug-FREE (the smallest RTL for their tier); each twin below is
+# the SAME configuration with DEBUG_EN=1 and a tier-appropriate Sdtrig trigger
+# count, named "<persona>-dbg". This keeps external debug ORTHOGONAL to the four
+# tiers: diffing "<persona>" against "<persona>-dbg" isolates the per-tier PPA
+# cost of the Sdext DM/DMI/SBA + hart-side debug CSRs (+ Sdtrig triggers) with
+# every other knob held constant.
+#
+# Derived from the base dicts (copied, not re-typed) so a twin can never silently
+# drift from its base under a later parameter edit; because it copies the base's
+# full dict, each twin still names every sweepable param explicitly -- the same
+# frozen-config guarantee the base personas carry.
+# A 0/2/4/8 ladder across the tiers: minimal -> full, which also spreads
+# DM_TRIGGER_NR sweep coverage (4 is otherwise only reached via ofat).
+_PERSONA_DBG_TRIGGERS = {
+    "light":       0,   # minimal debug: run-control + abstract GPR/CSR access, no HW triggers
+    "classic":     2,   # a small mcontrol6 trigger file, typical for an MCU
+    "performance": 4,   # mid trigger file for a compute core with real HW breakpoints
+    "ultra":       8,   # feature-complete: the full 8-trigger file
+}
+PERSONAS += [
+    (f"{base}-dbg", dict(cfg, DEBUG_EN=1, DM_TRIGGER_NR=_PERSONA_DBG_TRIGGERS[base]))
+    for base, cfg in list(PERSONAS)
+]
+
+# ---------------------------------------------------------------------------
+# COVERAGE_CONFIGS -- verification-only builds, deliberately NOT personas.
+#
+# PERSONAS above is an integrator-facing product ladder; entries here are not
+# products, they exist to elaborate as much RTL as possible in one simulation.
+# They are therefore excluded from -rtl_sweep and reachable only by name via
+# -rtl_config <name>, which is what run_cov uses for its third pass.
+#
+# Unlike a persona, an entry here lists only the DELTA from the run_config.json
+# defaults; everything unnamed keeps its default.
+#
+# "maxcov": every COUNT knob at maximum (more elaborated instances = strictly
+# more live RTL), plus the multiplier/divider implementations the default build
+# does NOT elaborate. MUL_TYPE/DIV_TYPE select mutually exclusive generate
+# branches, so a single build can never cover them all -- but run_cov merges
+# this pass with the two default-config passes, and the union then covers both
+# the shipping single-cycle multiplier / radix-2 divider (passes 1-2) and the
+# multi-cycle multiplier / radix-8 divider (this pass). Picking the defaults
+# here instead would just re-cover what passes 1-2 already did.
+#
+# Note the remaining variants (MUL_TYPE=2, DIV_TYPE=2) are still uncovered by
+# any pass; a second entry would be needed to close them.
+# The three entries below are designed as a SET: run together they span every
+# place the RTL has mutually exclusive implementations, so no pass needs the
+# shipping default config at all. What each one uniquely contributes:
+#
+#   MUL_TYPE   1 / 2 / 3   three separate generate branches; no build has two
+#   DIV_TYPE   3 / 2 / 1   likewise
+#   counts     max / mid / absent -- "absent" matters because the tie-off arms
+#              for unimplemented slots (arv_debug_trigger.v:402) only elaborate
+#              when slots are missing, so a max-only suite would never see them
+#   SCB        1 / 1 / 0   at SCB=0 the mux select at arv_fetch.v:411 becomes
+#              id_pc_o[1] and BOTH arms are live; at SCB=1 it is constant-true
+#              and the second arm is structurally unreachable (see :408-410)
+#   ARST       1 / 1 / 0   sync vs async reset in arv_dff
+#
+# Random delays go on cov_stress only. The wait-state edge case documented in
+# CLAUDE.md ("inst-bus address phase not held across wait states") is specific
+# to SINGLE_CYCLE_BRANCH=1, so the stressed pass keeps SCB=1; cov_alt's extra
+# reachable arm is instruction-alignment driven, not timing driven, and needs
+# no randomisation.
+#
+# Every entry keeps ALL features enabled (SU/DEBUG/NMI/CCSR/ZICNTR, C=4, B=4,
+# M=2) so the full test suite runs in all three. Deliberately NOT covered here:
+# SU_MODE_EN=0, M_EXTENSION=0/1, C_EXTENSION=0 and RV32E_EN=1 gate 12 tests
+# between them, but those builds REMOVE logic rather than adding it, so they
+# buy little coverage for a full pass each -- they stay with -rtl_sweep.
+COVERAGE_CONFIGS = [
+    ("cov_max", dict(
+        MUL_TYPE=1, DIV_TYPE=3,          # the shipping multiplier / divider
+        DM_TRIGGER_NR=8, ZIHPM_NR=8,     # counts at maximum: most instances live
+        SINGLE_CYCLE_BRANCH=1, ASYNC_RST_EN=1,
+    )),
+    ("cov_stress", dict(
+        MUL_TYPE=2, DIV_TYPE=2,          # 4-cycle multiplier, radix-4 divider
+        DM_TRIGGER_NR=2, ZIHPM_NR=4,     # mid counts: some slots present, some tied off
+        SINGLE_CYCLE_BRANCH=1, ASYNC_RST_EN=1,
+    )),
+    ("cov_alt", dict(
+        MUL_TYPE=3, DIV_TYPE=1,          # 16-cycle multiplier, radix-8 divider
+        DM_TRIGGER_NR=0, ZIHPM_NR=0,     # absent: exercises the tie-off arms
+        SINGLE_CYCLE_BRANCH=0, ASYNC_RST_EN=0,
+    )),
+]
+
+
+SWEEP_MODES = ("all", "corners", "ofat", "xprod", "default", "personas", "coverage",
+               "ofat-light")
+
+# OFAT_LIGHT -- feature-cost measurement set: the `light` persona with ONE feature
+# added (or one implementation choice changed) per entry. The `ofat` mode gives the
+# same one-factor view from the opposite end (the feature-rich run_config default
+# with one feature removed); the two bracket a feature's cost, which is not
+# additive between them (PMP scales with S-mode, Zcb shares the Zbb datapath, ...).
+#
+# Reachable only by `--sweep-mode ofat-light` or by name via -rtl_config
+# (`ofat-light:<label>`); deliberately NOT part of `all`, so the regression /
+# lint / synthesis -rtl_sweep counts are unchanged.
+#
+# Entries are (label, overrides-on-top-of-light). A feature whose parameter is
+# dead without an enabler carries the enabler in the same entry (DIV_TYPE needs
+# M_EXTENSION=2, DM_TRIGGER_NR needs DEBUG_EN=1); the enabler's own entry is the
+# reference for it.
+OFAT_LIGHT = [
+    ("RV32E_EN=0",              dict(RV32E_EN=0)),
+    ("M_EXTENSION=0",           dict(M_EXTENSION=0)),
+    ("M_EXTENSION=2",           dict(M_EXTENSION=2)),                 # adds the radix-2 divider (DIV_TYPE=3)
+    ("M_EXTENSION=2.DIV_TYPE=2",dict(M_EXTENSION=2, DIV_TYPE=2)),
+    ("M_EXTENSION=2.DIV_TYPE=1",dict(M_EXTENSION=2, DIV_TYPE=1)),
+    ("MUL_TYPE=2",              dict(MUL_TYPE=2)),
+    ("MUL_TYPE=1",              dict(MUL_TYPE=1)),
+    ("B_EXTENSION=1",           dict(B_EXTENSION=1)),
+    ("B_EXTENSION=2",           dict(B_EXTENSION=2)),
+    ("B_EXTENSION=3",           dict(B_EXTENSION=3)),
+    ("B_EXTENSION=4",           dict(B_EXTENSION=4)),
+    ("C_EXTENSION=0",           dict(C_EXTENSION=0)),
+    ("C_EXTENSION=2",           dict(C_EXTENSION=2)),
+    ("C_EXTENSION=3",           dict(C_EXTENSION=3)),
+    ("C_EXTENSION=4",           dict(C_EXTENSION=4)),
+    ("SU_MODE_EN=1",            dict(SU_MODE_EN=1)),
+    ("PMP_NR=4",                dict(PMP_NR=4)),                       # PMP on an M-only core
+    ("PMP_NR=8",                dict(PMP_NR=8)),
+    ("PMP_NR=16",               dict(PMP_NR=16)),
+    ("SU_MODE_EN=1.PMP_NR=4",   dict(SU_MODE_EN=1, PMP_NR=4)),        # PMP with S/U (MML rules live)
+    ("SU_MODE_EN=1.PMP_NR=8",   dict(SU_MODE_EN=1, PMP_NR=8)),
+    ("SU_MODE_EN=1.PMP_NR=16",  dict(SU_MODE_EN=1, PMP_NR=16)),
+    ("ZICNTR_EN=1",             dict(ZICNTR_EN=1)),
+    ("ZIHPM_NR=1",              dict(ZIHPM_NR=1)),
+    ("ZIHPM_NR=4",              dict(ZIHPM_NR=4)),
+    ("ZIHPM_NR=8",              dict(ZIHPM_NR=8)),
+    ("DEBUG_EN=1",              dict(DEBUG_EN=1)),
+    ("DEBUG_EN=1.DM_TRIGGER_NR=1", dict(DEBUG_EN=1, DM_TRIGGER_NR=1)),
+    ("DEBUG_EN=1.DM_TRIGGER_NR=2", dict(DEBUG_EN=1, DM_TRIGGER_NR=2)),
+    ("DEBUG_EN=1.DM_TRIGGER_NR=4", dict(DEBUG_EN=1, DM_TRIGGER_NR=4)),
+    ("DEBUG_EN=1.DM_TRIGGER_NR=8", dict(DEBUG_EN=1, DM_TRIGGER_NR=8)),
+    ("CCSR_EN=1",               dict(CCSR_EN=1)),
+    ("SINGLE_CYCLE_BRANCH=0",   dict(SINGLE_CYCLE_BRANCH=0)),
+    ("ASYNC_RST_EN=0",          dict(ASYNC_RST_EN=0)),
+]
 
 
 # Legend printed before the sweep list by `-list_configs` on every wrapper
@@ -222,8 +391,10 @@ SWEEP_SET_LEGEND = """\
 #                                                      in bin/rtl_sweep_configs.py
 #                                                      for per-entry rationale)
 #   persona:NAME   marketing/publication reference   -- named integration
-#                                                      profile (light / standard /
-#                                                      performance / ultra),
+#                                                      profile (light / classic /
+#                                                      performance / ultra, each
+#                                                      debug-free, plus a debug-
+#                                                      enabled "<name>-dbg" twin),
 #                                                      also included in the
 #                                                      `all` sweep set so every
 #                                                      regression / lint / synth
@@ -360,6 +531,39 @@ def generate_configs(params, mode="all"):
     # away and a broken persona definition wouldn't surface in regression
     # output under its own name. The tiny double-run cost is worth the
     # visibility guarantee.
+    # "coverage" is reachable ONLY by explicit -rtl_config <name>; it is
+    # deliberately not part of "all", so -rtl_sweep never runs these builds.
+    if mode == "coverage":
+        for label, overrides in COVERAGE_CONFIGS:
+            d = dict(default)
+            extra = [k for k in overrides if k not in d]
+            if extra:
+                raise RtlSweepConfigError(
+                    f"coverage config '{label}' names unknown param(s): {extra}")
+            for k, v in overrides.items():
+                if v not in params[k]["allowed"]:
+                    raise RtlSweepConfigError(
+                        f"coverage config '{label}': {k}={v} not in allowed "
+                        f"{params[k]['allowed']}")
+                d[k] = v
+            add(f"coverage:{label}", d, allow_duplicate=True)
+
+    if mode == "ofat-light":
+        base = dict(default)
+        base.update(dict(PERSONAS)["light"])
+        for label, overrides in OFAT_LIGHT:
+            d = dict(base)
+            for k, v in overrides.items():
+                if k not in d:
+                    raise RtlSweepConfigError(
+                        f"ofat-light entry '{label}' names unknown param '{k}'")
+                if v not in params[k]["allowed"]:
+                    raise RtlSweepConfigError(
+                        f"ofat-light '{label}' {k}={v} not in allowed "
+                        f"{params[k]['allowed']}")
+                d[k] = v
+            add(f"ofat-light:{label}", d, allow_duplicate=True)
+
     if mode in ("all", "personas"):
         for label, overrides in PERSONAS:
             d = dict(default)
@@ -389,7 +593,32 @@ def resolve_persona(name, params):
     to pick a single persona directly (bypassing the sweep-mode iteration).
     Raises RtlSweepConfigError if the name isn't a known persona.
     """
-    known = [lbl for lbl, _ in PERSONAS]
+    # Coverage-only configs are looked up first: they are not personas and are
+    # intentionally absent from every sweep mode, so generate_configs() below
+    # will never produce them.
+    for cov_label, cov_overrides in COVERAGE_CONFIGS:
+        if cov_label != name:
+            continue
+        extra = [k for k in cov_overrides if k not in params]
+        if extra:
+            raise RtlSweepConfigError(
+                f"coverage config '{name}' names unknown param(s): {extra}")
+        d = {k: params[k]["default"] for k in params}
+        for k, v in cov_overrides.items():
+            if v not in params[k]["allowed"]:
+                raise RtlSweepConfigError(
+                    f"coverage config '{name}': {k}={v} not in allowed "
+                    f"{params[k]['allowed']}")
+            d[k] = v
+        return f"coverage:{name}", d
+
+    if name.startswith("ofat-light:"):
+        for cfg_label, cfg_dict in generate_configs(params, "ofat-light")[1]:
+            if cfg_label == name:
+                return cfg_label, cfg_dict
+        raise RtlSweepConfigError(f"unknown ofat-light config '{name}'")
+
+    known = [lbl for lbl, _ in PERSONAS] + [lbl for lbl, _ in COVERAGE_CONFIGS]
     if name not in known:
         raise RtlSweepConfigError(
             f"unknown persona '{name}' (known: {known})")

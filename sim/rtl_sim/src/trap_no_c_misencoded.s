@@ -134,6 +134,10 @@ _start:
     la   t0, trap_handler
     csrw mtvec, t0
 
+    # Smdbltrp boot rule: arm NMIE, then clear MDT (both reset to 1/0 the wrong way
+    # for a plain M-mode trap: with MDT=1 a trap is 'unexpected' -> critical error).
+    csrsi 0x744, 8
+    csrw  mstatush, x0
     #=================================================================
     # Read misa, isolate the "C" bit (bit 2 -> mask 0x4), publish the
     # runtime decision to the scratchpad BEFORE the first x31 sync so

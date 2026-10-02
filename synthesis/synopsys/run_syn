@@ -76,9 +76,10 @@ while [[ $# -gt 0 ]]; do
             echo "  -rtl_config N|NAME[,N|NAME...]       : Synthesize sweep config(s); accepts a 1-based"
             echo "                                         integer index (e.g. 14 — same numbering as"
             echo "                                         ./run_all -rtl_sweep / run_lint --sweep) and/or"
-            echo "                                         a persona name (minimal / medium / full from"
+            echo "                                         a persona name (light / classic / performance /"
+            echo "                                         ultra, or a -dbg twin; see"
             echo "                                         bin/rtl_sweep_configs.py:PERSONAS). Mix freely,"
-            echo "                                         e.g. '14,minimal,full'. A single entry keeps"
+            echo "                                         e.g. '14,light,ultra'. A single entry keeps"
             echo "                                         legacy ./results/ output; multi-entry runs"
             echo "                                         snapshot per-config to ./results_sweep/."
             echo "  -rtl_sweep                           : Synthesize EVERY config in the sweep set;"
@@ -319,7 +320,7 @@ run_one_synthesis() {
 # Sanitize a sweep label into a filesystem-safe directory name.
 # (e.g. "corner-LO(all-min)" -> "corner-LO_all-min",
 #       "ofat:C_EXTENSION=0"  -> "ofat_C_EXTENSION_0",
-#       "persona:minimal"     -> "persona_minimal")
+#       "persona:light"       -> "persona_light")
 # ":" is converted to "_" (not stripped) so the family prefix and tail stay
 # visually separated; "(" ")" "," still strip silently.
 # ----------------------------------------------------------------------------
@@ -396,9 +397,9 @@ if [[ $RTL_SWEEP -eq 1 ]]; then
 elif [[ -n "$RTL_CONFIG" ]]; then
     # ------------------------------------------------------------------------
     # ONE OR MORE EXPLICIT CONFIGS: -rtl_config accepts either a 1-based index
-    # (e.g. "14") OR a persona name ("minimal" / "medium" / "full"), in any
+    # (e.g. "14") OR a persona name ("light" / "classic" / "performance" / "ultra"), in any
     # mix. Single entry → legacy ./results/. Multi-entry list (e.g. "1,4,15"
-    # or "minimal,medium,full" or "14,minimal") → per-entry snapshot to
+    # or "light,classic,ultra" or "14,light") → per-entry snapshot to
     # ./results_sweep/<idx_padded>_<label>/ for integers or
     # ./results_sweep/persona_<name>/ for personas, so the runs don't clobber
     # each other (synthesis is slow -- you don't want to rerun just to recover
@@ -432,6 +433,11 @@ elif [[ -n "$RTL_CONFIG" ]]; then
             # side prints (persona:NAME), so summary lines stay aligned across
             # sim/synth.
             SELECTED_LABELS+=("persona:$c")
+            SELECTED_KIND+=("persona")
+        elif [[ "$c" == ofat-light:* ]] && python3 ./gen_rtl_params.py --rtl-config "$c" >/dev/null 2>&1; then
+            # Feature-cost config (rtl_sweep_configs.py:OFAT_LIGHT): the label IS the
+            # name; gen_rtl_params resolves it like a persona.
+            SELECTED_LABELS+=("$c")
             SELECTED_KIND+=("persona")
         else
             echo "Error: -rtl_config '$c' is neither an integer sweep index nor a known persona" >&2

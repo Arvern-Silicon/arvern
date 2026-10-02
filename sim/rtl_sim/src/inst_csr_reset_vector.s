@@ -13,7 +13,7 @@
 #
 #   aRVern exposes the integrator-driven reset vector through an internal
 #   read-only custom CSR at 0xFFE, so firmware can discover its own reset PC.
-#   This CSR is internal (always present, independent of CCSR_EN/NMI_EN).
+#   This CSR is internal (always present, independent of CCSR_EN).
 #
 #   The firmware reads it twice (CSR readback + a PC-relative auipc at the
 #   reset entry) and stores both so the TB can check the CSR value matches the

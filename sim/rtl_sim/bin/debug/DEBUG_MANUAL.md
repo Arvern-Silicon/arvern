@@ -18,9 +18,9 @@ clock-period auto-detection, and hierarchical signal-name resolution.
 2. Summarize trace:        python3 ../bin/debug/asphalt_summary.py
 3. Locate the event:       python3 ../bin/debug/asphalt_context.py --trap 3
 4. Check VCD signals:      python3 ../bin/debug/vcd_find.py tb_arvern.vcd trap_taken --rise
-5. Correlate:              python3 ../bin/debug/asphalt_annotate.py asphalt.log tb_arvern.vcd irq_detect trap_pending_o trap_taken --cycles 400:600
+5. Correlate:              python3 ../bin/debug/asphalt_annotate.py asphalt.log tb_arvern.vcd irq_detect trap_pending trap_taken --cycles 400:600
 6. Drill into causes:      python3 ../bin/debug/vcd_cause.py tb_arvern.vcd trap_taken --cycle 412 --depth 2
-7. Open in GTKWave:        python3 ../bin/debug/vcd_gtkwave.py tb_arvern.vcd irq_software_i trap_pending_o trap_taken irq_suppress_post_mret --cycles 400:600 --out debug.gtkw && gtkwave debug.gtkw
+7. Open in GTKWave:        python3 ../bin/debug/vcd_gtkwave.py tb_arvern.vcd irq_software_i trap_pending trap_taken irq_suppress_post_mret --cycles 400:600 --out debug.gtkw && gtkwave debug.gtkw
 ```
 
 ---
@@ -160,11 +160,11 @@ the dispatch cycle for that instruction.
 
 ```
 python3 ../bin/debug/asphalt_annotate.py asphalt.log tb_arvern.vcd \
-    irq_detect irq_suppress_post_mret trap_pending_o trap_taken \
+    irq_detect irq_suppress_post_mret trap_pending trap_taken \
     --cycles 400:600
 
 python3 ../bin/debug/asphalt_annotate.py asphalt.log tb_arvern.vcd \
-    irq_software_i mstatus_mie trap_pending_o trap_taken \
+    irq_software_i mstatus_mie trap_pending trap_taken \
     --traps-only                    # only lines with trap != "-"
 ```
 
@@ -188,7 +188,7 @@ python3 ../bin/debug/vcd_trace.py tb_arvern.vcd mstatus_mie --transitions
 python3 ../bin/debug/vcd_trace.py tb_arvern.vcd --list           # list all signals
 python3 ../bin/debug/vcd_trace.py tb_arvern.vcd --grep trap      # search signal names
 python3 ../bin/debug/vcd_trace.py tb_arvern.vcd irq_software_i mstatus_mie irq_detect \
-    trap_pending_o trap_taken irq_suppress_post_mret \
+    trap_pending trap_taken irq_suppress_post_mret \
     --cycles 540:640 --clk-period 10000
 ```
 
@@ -230,7 +230,7 @@ python3 ../bin/debug/vcd_cause.py tb_arvern.vcd trap_taken --cycle 412 --config 
 **When to use**: After finding a suspicious cycle with `vcd_find`, use this to
 immediately see the full causal chain without manually listing every signal in
 `vcd_trace`.  E.g., if `trap_taken=0` at cycle 412 but should be 1, check
-`trap_pending_o` and `trap_drained` automatically.
+`trap_pending` and `trap_drained` automatically.
 
 **Extending cause_tree.json**: Add new signals as needed:
 ```json
@@ -241,7 +241,7 @@ immediately see the full causal chain without manually listing every signal in
 ```
 
 Currently defined signals: `trap_taken`, `trap_drained`, `pipeline_drained_for_irq`,
-`pipeline_drained_for_id`, `irq_detect`, `trap_pending_o`, `irq_suppress_post_mret`,
+`pipeline_drained_for_id`, `irq_detect`, `trap_pending`, `irq_suppress_post_mret`,
 `irq_suppress_clr`, `trap_stall_o`, `trap_stall_raw`, `wb_ldst_ready_o`, `ex_ldst_ready_o`.
 
 ---
@@ -252,7 +252,7 @@ Generate a `.gtkw` save file pre-zoomed to a cycle range with specified signals.
 
 ```
 python3 ../bin/debug/vcd_gtkwave.py tb_arvern.vcd \
-    irq_software_i mstatus_mie irq_detect trap_pending_o trap_taken irq_suppress_post_mret \
+    irq_software_i mstatus_mie irq_detect trap_pending trap_taken irq_suppress_post_mret \
     --cycles 400:600 --out irq_debug.gtkw
 gtkwave irq_debug.gtkw
 
@@ -267,7 +267,7 @@ pre-loaded — no manual signal dragging.
 ```
 irq_software_i
 # trap signals
-trap_pending_o
+trap_pending
 trap_taken
 ```
 
@@ -288,17 +288,17 @@ python3 ../bin/debug/asphalt_context.py --trap 3 --before 20
 python3 ../bin/debug/vcd_find.py tb_arvern.vcd trap_taken --rise
 
 # 4. If counts differ: check the cycle before the discrepancy
-python3 ../bin/debug/vcd_cause.py tb_arvern.vcd trap_pending_o --cycle 412 --depth 2
+python3 ../bin/debug/vcd_cause.py tb_arvern.vcd trap_pending --cycle 412 --depth 2
 
 # 5. Full picture at suspicious cycle range
 python3 ../bin/debug/asphalt_annotate.py asphalt.log tb_arvern.vcd \
-    irq_software_i irq_detect irq_suppress_post_mret trap_pending_o trap_taken \
+    irq_software_i irq_detect irq_suppress_post_mret trap_pending trap_taken \
     --cycles 400:450
 ```
 
 **Root cause found in this session (seed 1781569746)**:  `trap_taken` is purely
-combinatorial (`trap_pending_o & trap_drained`).  At the cycle when
-`trap_pending_o` first goes high, `trap_drained` is momentarily 1, causing a
+combinatorial (`trap_pending & trap_drained`).  At the cycle when
+`trap_pending` first goes high, `trap_drained` is momentarily 1, causing a
 delta-cycle glitch (0→1→0 within one timestep) invisible in the VCD.  The
 testbench `@(posedge trap_taken)` fires on this glitch and double-counts.
 **Fix**: sample `trap_taken` at `@(posedge free_clk)` in the ACTIVE region
@@ -336,7 +336,7 @@ After a test run, both `tb_arvern.vcd` and `asphalt.log` are left in
 
 ### asphalt.log column format
 
-Canonical spec lives in [`doc/asphalt_trace_format.md`](../../../doc/asphalt_trace_format.md)
+Canonical spec lives in [`doc/asphalt_trace_format.md`](../../../../doc/asphalt_trace_format.md)
 (all 13 columns, trailing annotations, snapshot header layout). Read it
 before writing any custom parser — the `asphalt_*` scripts in this
 directory already handle every edge case (Zcmp `# <N> mem ops`, trap
@@ -346,6 +346,6 @@ annotations, snapshot-vs-raw header skip).
 
 ## Clock Period
 
-The VCD timescale is `100ps`.  The default clock is 100 MHz → period = `10000`
+The VCD timescale is `100ps`.  The default clock is 1 MHz → period = `10000`
 ticks.  All scripts auto-detect the clock period from the `hclk` signal; you
 only need `--clk-period 10000` if auto-detection fails.

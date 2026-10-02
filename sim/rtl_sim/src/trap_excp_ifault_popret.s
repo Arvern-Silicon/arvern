@@ -139,6 +139,9 @@ handler_done:
     la   t0, trap_handler
     csrw mtvec, t0
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     li   s2, 0xAAAAAAAA

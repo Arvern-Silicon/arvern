@@ -26,7 +26,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)   // parens: callers pass expressions, e.g. 0x80 + ii*4
 
 initial
    begin
@@ -168,6 +168,47 @@ initial
       $display("");
       $display("--- SCAUSE verification (hw-driven platform IRQ 5, cause 21) ---");
       check_mem_value(`SPAD(32'h60), 32'h80000015);
+
+
+      //=================================================================
+      // PHASE 6: Every platform line drives its own MCAUSE
+      //=================================================================
+      $display("");
+      $display("");
+      $display(" ====================================================================");
+      $display("|  PHASE 6: ALL 16 PLATFORM LINES (MCAUSE = 0x80000010 + N)         |");
+      $display(" ====================================================================");
+      $display("");
+
+
+      // Every line's IRQ interrupts the same polling instruction, so 16 MRETs in a
+      // row carry the same MEPC and trip the livelock watchdog. That pattern is
+      // intentional here (the loop does advance -- in a register, not the PC), so
+      // suppress the checker for this phase only.
+      irq_kill_checker_en = 0;
+
+      // wait() rather than @(): the firmware advances as soon as the handler runs,
+      // so an edge-triggered wait can miss a value that is already present. Each
+      // target encodes the line index, so no stale value can match.
+      for (ii = 0; ii < 16; ii = ii + 1)
+         begin
+            wait (probes_cpu.x31 == (32'h60000000 | ii));
+            repeat(2) @(posedge free_clk);
+            irq_platform[ii] = 1'b1;
+
+            wait (probes_cpu.x31 == (32'h61000000 | ii));
+            repeat(2) @(posedge free_clk);
+            irq_platform[ii] = 1'b0;
+         end
+
+      wait (probes_cpu.x31 == 32'h66666666);
+      repeat(3) @(posedge free_clk);
+      irq_kill_checker_en = 1;
+
+      $display("");
+      $display("--- MCAUSE per platform line ---");
+      for (ii = 0; ii < 16; ii = ii + 1)
+         check_mem_value(`SPAD(32'h80 + ii*4), 32'h80000010 + ii);
 
 
       //=================================================================

@@ -33,7 +33,7 @@ integer allow_peripheral_accesses;
 
 // Scratchpad word address offset (byte address / 4)
 // SRAM base is 0x80000000, word-addressed starting at 0
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -138,32 +138,10 @@ initial
 
 
       //=================================================================
-      // PHASE 4: Load aligned to unmapped address (MCAUSE=5)
+      // PHASE REMOVED: aligned load/store to an unmapped address -- now an
+      // RNMI (mncause=0x80000003), not a synchronous exception, so it is out
+      // of this priority ordering. See the .s.
       //=================================================================
-      $display("");
-      $display("");
-      $display(" ====================================================================");
-      $display("|        PHASE 4: LOAD ACCESS FAULT (ALIGNED, UNMAPPED)              |");
-      $display(" ====================================================================");
-      $display("");
-      $display("Waiting for the firmware...");
-
-      @(probes_cpu.x31==32'h44444444);
-      repeat(3) @(posedge free_clk);
-
-      // Check trap_count = 3
-      check_mem_value(`SPAD(32'h00), 32'h00000003);
-
-      // Check MCAUSE = 5 (load access fault)
-      $display("");
-      $display("--- MCAUSE verification (load access fault) ---");
-      check_mem_value(`SPAD(32'h40), 32'h00000005);
-
-      // Check MTVAL = 0x10000000 (faulting address)
-      $display("");
-      $display("--- MTVAL verification (expect 0x10000000) ---");
-      check_mem_value(`SPAD(32'h44), 32'h10000000);
-
 
       //=================================================================
       // PHASE 5: Store misaligned to valid address (MCAUSE=6)
@@ -180,7 +158,7 @@ initial
       repeat(3) @(posedge free_clk);
 
       // Check trap_count = 4
-      check_mem_value(`SPAD(32'h00), 32'h00000004);
+      check_mem_value(`SPAD(32'h00), 32'h00000003);
 
       // Check MCAUSE = 6 (store address misaligned)
       $display("");
@@ -210,7 +188,7 @@ initial
       repeat(3) @(posedge free_clk);
 
       // Check trap_count = 5
-      check_mem_value(`SPAD(32'h00), 32'h00000005);
+      check_mem_value(`SPAD(32'h00), 32'h00000004);
 
       // Check MCAUSE = 6 (misaligned wins over access fault)
       $display("");
@@ -224,32 +202,10 @@ initial
 
 
       //=================================================================
-      // PHASE 7: Store aligned to unmapped address (MCAUSE=7)
+      // PHASE REMOVED: aligned load/store to an unmapped address -- now an
+      // RNMI (mncause=0x80000003), not a synchronous exception, so it is out
+      // of this priority ordering. See the .s.
       //=================================================================
-      $display("");
-      $display("");
-      $display(" ====================================================================");
-      $display("|        PHASE 7: STORE ACCESS FAULT (ALIGNED, UNMAPPED)             |");
-      $display(" ====================================================================");
-      $display("");
-      $display("Waiting for the firmware...");
-
-      @(probes_cpu.x31==32'h77777777);
-      repeat(3) @(posedge free_clk);
-
-      // Check trap_count = 6
-      check_mem_value(`SPAD(32'h00), 32'h00000006);
-
-      // Check MCAUSE = 7 (store access fault)
-      $display("");
-      $display("--- MCAUSE verification (store access fault) ---");
-      check_mem_value(`SPAD(32'h70), 32'h00000007);
-
-      // Check MTVAL = 0x00000000 (faulting address)
-      $display("");
-      $display("--- MTVAL verification (expect 0x00000000) ---");
-      check_mem_value(`SPAD(32'h74), 32'h00000000);
-
 
       //=================================================================
       // PHASE 8: Illegal instruction (MCAUSE=2, MTVAL=0)
@@ -266,7 +222,7 @@ initial
       repeat(3) @(posedge free_clk);
 
       // Check trap_count = 7
-      check_mem_value(`SPAD(32'h00), 32'h00000007);
+      check_mem_value(`SPAD(32'h00), 32'h00000005);
 
       // Check MCAUSE = 2 (illegal instruction)
       $display("");

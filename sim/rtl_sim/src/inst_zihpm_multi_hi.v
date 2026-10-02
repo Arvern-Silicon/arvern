@@ -25,7 +25,7 @@ integer zihpm_nr_found;
 reg [31:0] hi_rb;
 reg [31:0] expected_hi;
 
-`define SPAD(byte_off) (byte_off/4)
+`define SPAD(byte_off) ((byte_off)/4)
 
 initial
    begin
@@ -49,15 +49,15 @@ initial
       $display("");
 
       //=================================================================
-      // Wait for mimpid sync, learn ZIHPM_NR
+      // Wait for marv_cfg sync, learn ZIHPM_NR
       //=================================================================
       @(probes_cpu.x31 == 32'h11111111);
       repeat(3) @(posedge free_clk);
 
-      begin : read_mimpid
-         reg [31:0] mimpid_rb;
-         mimpid_rb      = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h00)];
-         zihpm_nr_found = mimpid_rb[23:20];
+      begin : read_marv_cfg
+         reg [31:0] marv_cfg_rb;
+         marv_cfg_rb    = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h00)];
+         zihpm_nr_found = marv_cfg_rb[15:12];
          $display("ZIHPM_NR = %0d  %t ns", zihpm_nr_found, $time);
       end
 

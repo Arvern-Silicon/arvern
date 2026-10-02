@@ -14,6 +14,7 @@
 
 arvern.v
 arv_dff.v
+arv_dff_sinit.v
 arv_fetch.v
 arv_decode.v
 arv_uop_sequencer.v
@@ -22,7 +23,13 @@ arv_csr_top.v
 arv_csr_cntr.v
 arv_csr_hpm.v
 arv_csr_ids.v
+arv_csr_pmp.v
+arv_pmp_check.v
 arv_csr_traps.v
+arv_csr_debug.v
+arv_debug_trigger.v
+arv_debug_dm.v
+arv_debug_sba.v
 arv_alu.v
 arv_alu_muldiv.v
 arv_load_store.v

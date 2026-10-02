@@ -111,7 +111,7 @@ generate
     //   This branch for Zmmul-only with single-cycle MUL.
     //   The shared counter / partial registers are stripped (no muldiv state machine).
     //   In this configuration, the MUL/DIV operations are not killable by exceptions.
-    if (~DIV_EN && MUL_1C_EN) begin : NO_SHARED_BUF
+    if (!DIV_EN && MUL_1C_EN) begin : NO_SHARED_BUF
 
         assign      shared_counter              = 6'h00;
         assign      shared_partial              = {67{1'b0}};
@@ -169,6 +169,9 @@ generate
         wire [66:0] shared_partial_reg;
         assign      shared_partial     =   shared_partial_reg;
 
+        // Load-enable for the 67-bit partial register (power: no churn during idle).
+        wire        shared_partial_en  =   mpy_mode_enable | div_mode_enable | kill_i | kill_r;
+
         wire [66:0] shared_partial_d   =  kill_i      ? {67{1'b0}}                                 :
                                           kill_r      ? {67{1'b0}}                                 :
                                           mpy_start   ? {3'h0, mpy_acc_init}                       :
@@ -177,7 +180,7 @@ generate
                                                         {div_partial_rem_nxt[34:0], div_result_tmp_nxt};
 
         arv_dff #(.WIDTH(67), .ARST_EN(ARST_EN)) u_shared_partial (
-                               .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1),
+                               .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(shared_partial_en),
                                                                     .d_i (shared_partial_d),
                                                                     .q_o (shared_partial_reg));
 
@@ -214,8 +217,8 @@ assign  mpy_operand2      = {{32{mpy_operand2_sign}}, (ex_operand2_i & {32{mpy_m
 assign  mpy_acc           = shared_partial[63:0];
 
 // No terminating `else` by design: exactly one of MUL_1C_EN/MUL_4C_EN/MUL_16C_EN
-// is set when MUL is enabled, and all three are 0 when MUL is disabled. This is GUARANTEED by
-// the top-level MUL_TYPE_USE clamp in the top level.
+// is set when MUL is enabled, and all three are 0 when MUL is disabled. This is
+// GUARANTEED by the top-level MUL_TYPE_USE clamp.
 generate
     //------------------------------------------------------------------------------------------------
     // Single-cycle Multiplication
@@ -372,7 +375,7 @@ generate
     //------------------------------------------------------------------------------------------------
     // No Hardware divider (Zmmul or none)
     //------------------------------------------------------------------------------------------------
-    if (~DIV_EN) begin : NO_DIV
+    if (!DIV_EN) begin : NO_DIV
 
         assign      div_mode_enable            =  1'b0;
         assign      div_is_signed              =  1'b0;
@@ -437,16 +440,15 @@ generate
     end
 endgenerate
 
-// No terminating `else` by design): exactly one of DIV_12C_EN/DIV_17C_EN/DIV_33C_EN
-// is set when DIV is enabled, all 0 when DIV is disabled. GUARANTEED by the top-level
-// DIV_TYPE_USE clamp in top level.
+// No terminating `else` by design: same guarantee as the multiplier generate above,
+// via the top-level DIV_TYPE_USE clamp (exactly one of DIV_12C/17C/33C_EN, or all 0).
 generate
     //------------------------------------------------------------------------------------------------
     // 12-cycles Division
     //------------------------------------------------------------------------------------------------
     if (DIV_12C_EN) begin : DIV_12_CYCLES
 
-        // Radix-8 division needs 1+12 cycles
+        // Radix-8 division needs 1+11 cycles
         assign      div_counter_init            = 6'd10;
 
         // Build multiples of the divisor
@@ -631,7 +633,9 @@ assign      result_div         = (({32{result_div_sign}} ^ result_div_pre) + {{3
 assign      result_o   = result_mpy | result_div;
 assign      done_o     = mpy_done   | div_done  ;
 
-// Unused clock and reset
+// Unused control bits: [5] (DIVU) and [2] (MULHSU) are never consumed directly --
+// their selection is implied (DIVU is the unsigned case of ~div_is_signed, MULHSU's
+// operand signs follow from ~ex_alu_control_i[3] / ex_alu_control_i[1:0]).
 wire        ex_alu_control_5_unused = ex_alu_control_i[5];
 wire        ex_alu_control_2_unused = ex_alu_control_i[2];
 

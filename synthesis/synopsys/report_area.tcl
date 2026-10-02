@@ -89,7 +89,7 @@ if {[info exists NAND2_NAME]} {
 
     # MUL/DIV (arv_alu_muldiv_inst) is instantiated INSIDE arv_alu_inst under a
     # `if (MUL_EN) begin : WITH_MULDIV` generate guard. To produce the same split
-    # as `characterization_guide.md` §2.2 (ALU and MUL/DIV as separate rows),
+    # as `synthesis_guide.md` §2.2 (ALU and MUL/DIV as separate rows),
     # we have to report muldiv separately and subtract it from the parent ALU
     # number so the rows sum to the same TOTAL. Absent under M_EXTENSION=0.
     set has_muldiv 0
@@ -115,7 +115,49 @@ if {[info exists NAND2_NAME]} {
         redirect -variable uop_area {report_area}
     }
 
-    # Sequential-cell count (flop population) for the §11.6 'Sequential cells'
+    # ---- External-debug subsystem (Sdext/Sdtrig, DEBUG_EN / DM_TRIGGER_EN gated).
+    # Each block sits under a generate guard, so search by module ref_name and report
+    # only when present. arv_debug_dm is a top-level child of arvern (its own row);
+    # arv_debug_sba lives inside it and is split out (like MUL/DIV vs ALU). arv_csr_debug
+    # and arv_debug_trigger live inside arv_csr_top and are subtracted from CSR core so
+    # the per-row totals still sum to TOTAL.
+    set has_debug_dm 0
+    current_design $DESIGN_NAME
+    set dbg_dm_cells [get_cells -hier -filter "ref_name =~ *arv_debug_dm*" -quiet]
+    if {[sizeof_collection $dbg_dm_cells] > 0} {
+        set has_debug_dm 1
+        current_design [get_attribute [index_collection $dbg_dm_cells 0] ref_name]
+        redirect -variable debug_dm_area {report_area}
+    }
+
+    set has_debug_sba 0
+    current_design $DESIGN_NAME
+    set dbg_sba_cells [get_cells -hier -filter "ref_name =~ *arv_debug_sba*" -quiet]
+    if {[sizeof_collection $dbg_sba_cells] > 0} {
+        set has_debug_sba 1
+        current_design [get_attribute [index_collection $dbg_sba_cells 0] ref_name]
+        redirect -variable debug_sba_area {report_area}
+    }
+
+    set has_csr_debug 0
+    current_design $DESIGN_NAME
+    set csr_debug_cells [get_cells -hier -filter "ref_name =~ *arv_csr_debug*" -quiet]
+    if {[sizeof_collection $csr_debug_cells] > 0} {
+        set has_csr_debug 1
+        current_design [get_attribute [index_collection $csr_debug_cells 0] ref_name]
+        redirect -variable csr_debug_area {report_area}
+    }
+
+    set has_debug_trigger 0
+    current_design $DESIGN_NAME
+    set dbg_trig_cells [get_cells -hier -filter "ref_name =~ *arv_debug_trigger*" -quiet]
+    if {[sizeof_collection $dbg_trig_cells] > 0} {
+        set has_debug_trigger 1
+        current_design [get_attribute [index_collection $dbg_trig_cells 0] ref_name]
+        redirect -variable debug_trigger_area {report_area}
+    }
+
+    # Sequential-cell count (flop population) for the §2.2 'Sequential cells'
     # row. `all_registers -cells` is the canonical dc_shell way to enumerate
     # every flop in the design.
     current_design $DESIGN_NAME
@@ -149,6 +191,26 @@ if {[info exists NAND2_NAME]} {
     } else {
         set csr_hpm_area 0
     }
+    if {$has_debug_dm} {
+        regexp {Total cell area:\s+([^\n]+)\n} $debug_dm_area whole_match debug_dm_area
+    } else {
+        set debug_dm_area 0
+    }
+    if {$has_debug_sba} {
+        regexp {Total cell area:\s+([^\n]+)\n} $debug_sba_area whole_match debug_sba_area
+    } else {
+        set debug_sba_area 0
+    }
+    if {$has_csr_debug} {
+        regexp {Total cell area:\s+([^\n]+)\n} $csr_debug_area whole_match csr_debug_area
+    } else {
+        set csr_debug_area 0
+    }
+    if {$has_debug_trigger} {
+        regexp {Total cell area:\s+([^\n]+)\n} $debug_trigger_area whole_match debug_trigger_area
+    } else {
+        set debug_trigger_area 0
+    }
 
     # MUL/DIV is reported as its own row; subtract it from the parent ALU
     # number so the per-row totals still sum to the design TOTAL. Without
@@ -160,7 +222,15 @@ if {[info exists NAND2_NAME]} {
     # arv_csr_top hierarchical area so the remaining csr_top_area represents
     # the "CSR core" (mtraps + ids + decode + read-mux) only — and the three
     # CSR rows sum to the full subsystem.
-    set csr_top_area [expr $csr_top_area - $csr_cntr_area - $csr_hpm_area]
+    # arv_csr_debug (hart-side debug CSRs) and arv_debug_trigger (Sdtrig) also live
+    # inside arv_csr_top, so subtract them too -> "CSR core" excludes all debug logic.
+    set csr_top_area [expr $csr_top_area - $csr_cntr_area - $csr_hpm_area - $csr_debug_area - $debug_trigger_area]
+
+    # arv_debug_sba lives inside arv_debug_dm; split it out so "DM core" + "Debug SBA"
+    # sum to the DM instance area (same trick as MUL/DIV vs ALU).
+    set dm_core_area     [expr $debug_dm_area - $debug_sba_area]
+    # Whole external-debug subsystem = DM (core + SBA) + hart-side debug CSRs + triggers.
+    set debug_total_area [expr $debug_dm_area + $csr_debug_area + $debug_trigger_area]
 
     set arv_nand2_eq      [expr round($arv_area/$nand2_area)]
     set fetch_nand2_eq    [expr round($fetch_area/$nand2_area)]
@@ -174,6 +244,12 @@ if {[info exists NAND2_NAME]} {
     set ldst_nand2_eq     [expr round($ldst_area/$nand2_area)]
 
     set uop_nand2_eq [expr round($uop_area/$nand2_area)]
+
+    set dm_core_nand2_eq       [expr round($dm_core_area/$nand2_area)]
+    set debug_sba_nand2_eq     [expr round($debug_sba_area/$nand2_area)]
+    set csr_debug_nand2_eq     [expr round($csr_debug_area/$nand2_area)]
+    set debug_trigger_nand2_eq [expr round($debug_trigger_area/$nand2_area)]
+    set debug_total_nand2_eq   [expr round($debug_total_area/$nand2_area)]
 
     set arv_area         [expr round($arv_area)]
     set fetch_area       [expr round($fetch_area)]
@@ -199,6 +275,18 @@ if {[info exists NAND2_NAME]} {
 
     set uop_area     [expr round($uop_area)]
     set uop_per      [format "%.1f%%" [expr 100.0*$uop_area/$arv_area]]
+
+    set dm_core_area       [expr round($dm_core_area)]
+    set debug_sba_area     [expr round($debug_sba_area)]
+    set csr_debug_area     [expr round($csr_debug_area)]
+    set debug_trigger_area [expr round($debug_trigger_area)]
+    set debug_total_area   [expr round($debug_total_area)]
+
+    set dm_core_per        [format "%.1f%%" [expr 100.0*$dm_core_area/$arv_area]]
+    set debug_sba_per      [format "%.1f%%" [expr 100.0*$debug_sba_area/$arv_area]]
+    set csr_debug_per      [format "%.1f%%" [expr 100.0*$csr_debug_area/$arv_area]]
+    set debug_trigger_per  [format "%.1f%%" [expr 100.0*$debug_trigger_area/$arv_area]]
+    set debug_total_per    [format "%.1f%%" [expr 100.0*$debug_total_area/$arv_area]]
 
     ##########################################################################
     #                    WRITE TO DEDICATED REPORT FILE                     #
@@ -233,6 +321,10 @@ if {[info exists NAND2_NAME]} {
     puts $fp [format "%-25s | %12d | %12d | %10s" "CSR Zicntr"            $csr_cntr_area $csr_cntr_nand2_eq $csr_cntr_per]
     puts $fp [format "%-25s | %12d | %12d | %10s" "CSR Zihpm"             $csr_hpm_area  $csr_hpm_nand2_eq  $csr_hpm_per]
     puts $fp [format "%-25s | %12d | %12d | %10s" "UOP Sequencer"         $uop_area      $uop_nand2_eq      $uop_per]
+    puts $fp [format "%-25s | %12d | %12d | %10s" "Debug Module core"     $dm_core_area       $dm_core_nand2_eq       $dm_core_per]
+    puts $fp [format "%-25s | %12d | %12d | %10s" "Debug SBA"             $debug_sba_area     $debug_sba_nand2_eq     $debug_sba_per]
+    puts $fp [format "%-25s | %12d | %12d | %10s" "Debug CSRs (hart)"     $csr_debug_area     $csr_debug_nand2_eq     $csr_debug_per]
+    puts $fp [format "%-25s | %12d | %12d | %10s" "Debug Triggers"        $debug_trigger_area $debug_trigger_nand2_eq $debug_trigger_per]
     puts $fp [string repeat "-" 80]
     puts $fp [format "%-25s | %12d | %12d | %10s" "TOTAL (arvern)"        $arv_area      $arv_nand2_eq      $arv_per]
     puts $fp "================================================================================"
@@ -251,6 +343,31 @@ if {[info exists NAND2_NAME]} {
     puts $fp [format "  2. ALU:                   %d NAND2 (%s)" $alu_nand2_eq     $alu_per]
     puts $fp [format "  3. CSR subsystem:         %d NAND2 (%s)" $csr_top_nand2_eq $csr_top_per]
     puts $fp [format "  4. MUL / DIV:             %d NAND2 (%s)" $muldiv_nand2_eq  $muldiv_per]
+    puts $fp ""
+
+    puts $fp "DEBUG SUBSYSTEM (Sdext external debug + Sdtrig triggers):"
+    if {$has_debug_dm} {
+        puts $fp [format "  - Total debug area:         %d NAND2 (%s of core)" $debug_total_nand2_eq $debug_total_per]
+        puts $fp [format "      Debug Module core:      %d NAND2 (%s)" $dm_core_nand2_eq       $dm_core_per]
+        puts $fp [format "      System Bus Access:      %d NAND2 (%s)" $debug_sba_nand2_eq     $debug_sba_per]
+        puts $fp [format "      Hart-side debug CSRs:   %d NAND2 (%s)" $csr_debug_nand2_eq     $csr_debug_per]
+        if {$has_debug_trigger} {
+            puts $fp [format "      Sdtrig triggers:        %d NAND2 (%s)" $debug_trigger_nand2_eq $debug_trigger_per]
+        } else {
+            puts $fp "      Sdtrig triggers:        0 NAND2 (DM_TRIGGER_NR=0)"
+        }
+        puts $fp "  Insights:"
+        puts $fp "    * SBA (the System Bus Access AHB master) is typically the largest debug"
+        puts $fp "      sub-block; it is the debugger's only memory path (frozen-hart, no progbuf)."
+        puts $fp "    * The abstract GPR read STEALS the ex_reg_src2 read port and the write"
+        puts $fp "      STEALS the ex_reg_dest write port -> NO dedicated register-file access"
+        puts $fp "      muxes (a full 32:1 read mux, ~1k NAND2, was removed). Cost is one extra"
+        puts $fp "      select mux on the shared ports, not a duplicated read/write path."
+        puts $fp "    * The debug area above is entirely gated by DEBUG_EN; with DEBUG_EN=0 the"
+        puts $fp "      DM/CSR/trigger logic is not built and the shared-port muxes fold away."
+    } else {
+        puts $fp "  - Not present (DEBUG_EN=0): all debug logic tied off / optimized away."
+    }
     puts $fp ""
 
     puts $fp "================================================================================"
@@ -274,6 +391,11 @@ if {[info exists NAND2_NAME]} {
     puts $fp "NAND2 equivalent cell area: CSR Zicntr            --> $csr_cntr_nand2_eq"
     puts $fp "NAND2 equivalent cell area: CSR Zihpm             --> $csr_hpm_nand2_eq"
     puts $fp "NAND2 equivalent cell area: UOP Sequencer         --> $uop_nand2_eq"
+    puts $fp "NAND2 equivalent cell area: Debug Module core      --> $dm_core_nand2_eq"
+    puts $fp "NAND2 equivalent cell area: Debug SBA              --> $debug_sba_nand2_eq"
+    puts $fp "NAND2 equivalent cell area: Debug CSRs (hart)      --> $csr_debug_nand2_eq"
+    puts $fp "NAND2 equivalent cell area: Debug Triggers         --> $debug_trigger_nand2_eq"
+    puts $fp "NAND2 equivalent cell area: Debug subsystem TOTAL  --> $debug_total_nand2_eq"
     puts $fp "Sequential cells (flop count)                     --> $seq_cells_count"
     close $fp
 
@@ -301,6 +423,10 @@ if {[info exists NAND2_NAME]} {
     append ::AREA_ANALYSIS [format "     | %-25s | %12d | %12d | %10s          |\n" "CSR Zicntr"            $csr_cntr_area $csr_cntr_nand2_eq $csr_cntr_per]
     append ::AREA_ANALYSIS [format "     | %-25s | %12d | %12d | %10s          |\n" "CSR Zihpm"             $csr_hpm_area  $csr_hpm_nand2_eq  $csr_hpm_per]
     append ::AREA_ANALYSIS [format "     | %-25s | %12d | %12d | %10s          |\n" "UOP Sequencer"         $uop_area      $uop_nand2_eq      $uop_per]
+    append ::AREA_ANALYSIS [format "     | %-25s | %12d | %12d | %10s          |\n" "Debug Module core"     $dm_core_area       $dm_core_nand2_eq       $dm_core_per]
+    append ::AREA_ANALYSIS [format "     | %-25s | %12d | %12d | %10s          |\n" "Debug SBA"             $debug_sba_area     $debug_sba_nand2_eq     $debug_sba_per]
+    append ::AREA_ANALYSIS [format "     | %-25s | %12d | %12d | %10s          |\n" "Debug CSRs (hart)"     $csr_debug_area     $csr_debug_nand2_eq     $csr_debug_per]
+    append ::AREA_ANALYSIS [format "     | %-25s | %12d | %12d | %10s          |\n" "Debug Triggers"        $debug_trigger_area $debug_trigger_nand2_eq $debug_trigger_per]
     append ::AREA_ANALYSIS "     |---------------------------+--------------+--------------+---------------------|\n"
     append ::AREA_ANALYSIS [format "     | %-25s | %12d | %12d | %10s          |\n" "TOTAL (arvern)"        $arv_area      $arv_nand2_eq      $arv_per]
     append ::AREA_ANALYSIS [format "     | %-25s | %12d | %-12s | %10s          |\n" "Sequential cells"      $seq_cells_count "(flops)"        "n/a"]

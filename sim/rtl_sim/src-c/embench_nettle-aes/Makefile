@@ -5,7 +5,9 @@ BENCHMARK_NAME = embench_nettle-aes
 EMBENCH_ELF = ../embench-iot/bd/src/nettle-aes/nettle-aes
 
 # Load MARCH and toolchain configuration from auto-generated file (based on RTL config)
-MARCH_CONFIG_FILE = ../../run/march_config.sh
+# ARV_MARCH_CONFIG (set by runsim.py) points at the run's private copy in its work dir;
+# concurrent runs must not read the shared one in run/.
+MARCH_CONFIG_FILE = $(if $(ARV_MARCH_CONFIG),$(ARV_MARCH_CONFIG),../../run/march_config.sh)
 ifneq ($(wildcard $(MARCH_CONFIG_FILE)),)
     MARCH_STD  := $(shell bash -c 'source $(MARCH_CONFIG_FILE) && echo $$MARCH_STD')
     MARCH_COMP := $(shell bash -c 'source $(MARCH_CONFIG_FILE) && echo $$MARCH_COMP')

@@ -4,14 +4,14 @@
 #
 # This script runs the full regression suite with all enabled tests.
 # Waveform dumping is disabled by default to speed up execution.
-# All enabled tests are run with all 32 timing variants by default.
+# All enabled tests are run with all 36 timing variants by default.
 #
 # Usage Examples:
-#   ./run_all                                    # Run one regression iteration (all 32 variants)
+#   ./run_all                                    # Run one regression iteration (all 36 timing variants)
 #   ./run_all -n 5                               # Run 5 regression iterations
 #   ./run_all -j 4                               # Run tests in parallel (4 workers)
 #   ./run_all -j 4 -n 5                          # Parallel with 5 iterations
-#   ./run_all -fast                              # Run with only base variant (fast, ~32x faster)
+#   ./run_all -fast                              # Run with only base variant (fast, ~36x faster)
 #   ./run_all -fast -n 3                         # Fast mode with 3 iterations
 #   ./run_all -fast -rirq -j 4                   # Run all tests with random IRQ variant, 4 workers
 #   ./run_all -fast -rwsrom -rsalu               # Run all tests with specific variant
@@ -31,7 +31,7 @@
 #     -j N                 Number of tests to run in parallel (default: 1)
 #                          Each test runs in its own work directory under run/WORK/
 #     -fast                Run only base variant (no timing variations)
-#                          Makes regression ~32x faster - useful for quick sanity checks
+#                          Makes regression ~36x faster - useful for quick sanity checks
 #     --stop-on-fail       Stop immediately after first test that fails any variant
 #                          Useful for debugging - saves time by not running remaining tests
 #     --report-show-all    Show all tests in detailed report (default: only failures/timeouts)
@@ -66,7 +66,7 @@
 #                             0 = enable waveform dumping (very slow, huge files)
 #   VERILOG_SIMULATOR         Simulator to use (iverilog, verilator, vcs, vsim, etc.)
 #   REGRESSION_SINGLE_VARIANT 1 = run only base variant (set by -fast flag)
-#                             0 = run all 32 timing variants (default)
+#                             0 = run all 36 timing variants (default)
 #
 # Output:
 #   - Results logged to ./log/<iteration>/<test>-<mode>-<variant>.log
@@ -79,13 +79,69 @@
 REGRESSION_SINGLE_VARIANT=0
 FILTERED_ARGS=()
 
+COV_MODE=0
+COV_APPEND=0
+COV_NAME=""
+COV_NAME_NEXT=0
 for arg in "$@"; do
     if [ "$arg" = "-fast" ] || [ "$arg" = "--single-variant" ]; then
         REGRESSION_SINGLE_VARIANT=1
+    elif [ "$arg" = "-cov" ]; then
+        COV_MODE=1
+    elif [ "$arg" = "-cov+" ] || [ "$arg" = "-cov_add" ]; then
+        COV_MODE=1; COV_APPEND=1
+    elif [ "$arg" = "-cov-as" ]; then
+        COV_NAME_NEXT=1
+    elif [ "${COV_NAME_NEXT:-0}" = "1" ]; then
+        COV_NAME="$arg"; COV_NAME_NEXT=0
     else
         FILTERED_ARGS+=("$arg")
     fi
 done
+
+# -cov: collect line/branch/toggle coverage over the whole regression. Verilator only
+# (Icarus cannot measure it); every run drops its coverage.dat into run/cov/dats and the
+# report is generated once at the end.
+# -cov-as <name> keeps a run in its own database so it cannot overwrite another.
+if [ -n "${COV_NAME:-}" ]; then COV_DIR="$(pwd)/cov/runs/$COV_NAME"; else COV_DIR="$(pwd)/cov"; fi
+# Report on the CPU only. The bench pulls in arvern-ips (aclint, plic, dtm...),
+# which are separately verified IPs and would otherwise dominate the file list.
+COV_RTL="$(cd ../../../rtl/verilog 2>/dev/null && pwd)/"
+if [ $COV_MODE -eq 1 ]; then
+    if ! command -v verilator >/dev/null 2>&1; then
+        echo "ERROR: -cov needs Verilator (>= 5.0, for --binary --timing)"; exit 1
+    fi
+    VERILOG_SIMULATOR=verilator
+    SIMULATION_COVERAGE=1
+    SIMULATION_COV_DATS="$COV_DIR/dats"
+    export VERILOG_SIMULATOR SIMULATION_COVERAGE SIMULATION_COV_DATS
+    if [ $COV_APPEND -eq 0 ]; then
+        rm -rf "$COV_DIR/dats" "$COV_DIR/coverage.html"
+    fi
+    mkdir -p "$COV_DIR/dats"
+    echo "| Coverage: ON (Verilator)$([ $COV_APPEND -eq 1 ] && echo ', appending') -> $COV_DIR"
+
+    # Each run drops a ~10 MB .dat, so a full sweep would be tens of GB. Fold them into
+    # one accumulator as they land and delete the originals; merging collapses N dats to
+    # the size of one, so the pool stays bounded however many runs there are. rtlsim.sh
+    # publishes each dat with mv (atomic), so anything visible here is complete.
+    COV_MERGE_AT=${COV_MERGE_AT:-40}
+    cov_merge_pool () {
+        local d="$COV_DIR/dats" acc="$COV_DIR/dats/_accum.dat"
+        local files=( "$d"/cov_*.dat )
+        [ -e "${files[0]}" ] || return 0
+        [ "${#files[@]}" -lt "${1:-$COV_MERGE_AT}" ] && return 0
+        if [ -f "$acc" ]; then
+            verilator_coverage --write "$acc.new" "$acc" "${files[@]}" >/dev/null 2>&1
+        else
+            verilator_coverage --write "$acc.new" "${files[@]}" >/dev/null 2>&1
+        fi
+        [ -f "$acc.new" ] && mv "$acc.new" "$acc" && rm -f "${files[@]}"
+    }
+    touch "$COV_DIR/.merging"
+    ( while [ -f "$COV_DIR/.merging" ]; do sleep 20; cov_merge_pool; done ) &
+    COV_MERGER_PID=$!
+fi
 
 # Export environment variables
 export REGRESSION_SINGLE_VARIANT
@@ -105,8 +161,23 @@ export SIMULATION_NOTRACE
 #   - vcs       : VCS
 #   - vsim      : Modelsim
 #   - isim      : Xilinx simulator
-VERILOG_SIMULATOR=iverilog
+VERILOG_SIMULATOR=${VERILOG_SIMULATOR:-iverilog}
 export VERILOG_SIMULATOR
 
 # Run regression suite (pass filtered arguments without -fast)
 ../bin/runsim.py -regression "${FILTERED_ARGS[@]}"
+RC=$?
+
+if [ $COV_MODE -eq 1 ]; then
+    rm -f "$COV_DIR/.merging"
+    wait $COV_MERGER_PID 2>/dev/null
+    cov_merge_pool 1          # final fold, whatever is left
+    echo
+    du -sh "$COV_DIR/dats" 2>/dev/null | awk '{print "  database size: " $1}'
+    echo "===================== COVERAGE ====================="
+    python3 ../bin/cov_report.py "$COV_DIR/dats" --rtl "$COV_RTL"
+    echo
+    python3 ../bin/cov_html.py   "$COV_DIR/dats" -o "$COV_DIR/coverage.html" --rtl "$COV_RTL"
+    echo "  report: $COV_DIR/coverage.html"
+fi
+exit $RC

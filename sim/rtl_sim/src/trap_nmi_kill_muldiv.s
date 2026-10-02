@@ -11,10 +11,10 @@
 #----------------------------------------------------------------------------
 # Description: NMI LOW-LATENCY KILL OF MULDIV/UOP
 #   Verifies that an NMI aborts a multi-cycle MUL/DIV (or Zcmp UOP sequence)
-#   even when software has NOT enabled the IRQ-kill feature in irqkill_cfg.
+#   even when software has NOT enabled the IRQ-kill feature in marv_ctl.
 #   Spec posture: NMIs must be low-latency regardless of OS configuration.
 #
-#   Phase 2: irqkill_cfg=0, long div in tight loop, NMI fires.
+#   Phase 2: marv_ctl=0, long div in tight loop, NMI fires.
 #   MNEPC must land on a DIV instruction (kill happened) — not on
 #   an instruction past the DIV (which would mean NMI waited for
 #   natural completion).
@@ -74,9 +74,10 @@ nmi_handler:
 
     # Publish handler address for the testbench (drives nmi_vector)
     la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
     sw   t0, 0x08(s1)
 
-    # IMPORTANT: irqkill_cfg = 0 -> kills are DISABLED for IRQs.
+    # IMPORTANT: marv_ctl = 0 -> kills are DISABLED for IRQs.
     # Post-fix, NMI must still kill the muldiv (force-enabled).
     li   t0, 0x0
     csrw 0x7FF, t0

@@ -179,14 +179,14 @@ _RE_LINE = re.compile(
     r'(x\d+=0x[0-9a-fA-F]+|\[x\d+\]|\S+)'      # 9: tgt_reg
     r'(?:\s+([24]))?'                              # 10: sz   (optional)
     r'(?:\s+([TN\-]))?'                            # 11: br  (optional)
-    r'(?:\s+((?:IRQ|EXC):\S+|[MS]RET|\-))?'        # 12: trap (optional)
+    r'(?:\s+((?:IRQ|EXC):\S+|NMI|MRET|SRET|MNRET|\-))?'  # 12: trap (optional): IRQ:*, EXC:*, NMI, MRET, SRET, MNRET or -
     r'(?:\s+([MSU?]))?'                            # 13: priv (optional)
     r'\s*(?:#.*)?$',                               # optional trailing comment
     re.IGNORECASE,
 )
 
 _RE_TGT = re.compile(r'^x(\d+)=0x([0-9a-fA-F]+)$', re.IGNORECASE)
-_RE_STORE_SRC = re.compile(r'^\[x(\d+)\]$')
+_RE_STORE_SRC = re.compile(r'^\[x(\d+)\]=0x([0-9a-fA-F]+)$', re.IGNORECASE)   # store: source register and the value put on the bus
 
 
 # ─── Register extraction ──────────────────────────────────────────────────────

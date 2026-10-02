@@ -159,6 +159,9 @@ main:
 
     # First set MPP to a known value (M-mode = 2'b11)
     li   t0, 0x1800
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Read MSTATUS before

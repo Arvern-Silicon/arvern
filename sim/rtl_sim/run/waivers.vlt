@@ -1,1 +1,5 @@
 `verilator_config
+
+// SYNCASYNCNET on hresetn_i: INTENTIONAL mixed usage. arv_debug_dm samples
+// hart_resetn_i (= hresetn_i) as hclk-synchronous DATA into the dbgresetn-domain
+lint_off -rule SYNCASYNCNET -file "*/arvern.v" -match "*'hresetn_i'*"

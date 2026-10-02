@@ -42,6 +42,16 @@ _start:
     sw   zero, 0x08(s1)
     sw   zero, 0x0C(s1)
 
+    # Wait for the timebase to actually start before sampling it. MTIME is
+    # clocked by the platform's low-frequency oscillator, whose reset releases
+    # a few LF periods after the core's -- at a realistic 32 kHz that is tens of
+    # microseconds, far longer than it takes to get here. Reading `time` before
+    # then legitimately returns 0, so a first sample of 0 says nothing about the
+    # counter. Spin until it has ticked at least once.
+wait_start:
+    csrr t1, time
+    beqz t1, wait_start
+
     # First time read (LO-then-HI is the canonical RV32 sequence)
 read_t0:
     csrr t0, timeh                  # snapshot high half first

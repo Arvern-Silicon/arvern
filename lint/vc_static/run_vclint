@@ -1,0 +1,316 @@
+#!/bin/bash
+#----------------------------------------------------------------------------
+#          _    _           Family:    aRVern System IPs
+#         / \__/ \          Module:    run_vclint
+#        /   /\   \         --------------------------------------------
+#    ===/   /=========      Copyright: (c) 2026, aRVern-dev
+#      /   / RV \   \       Contact:   arvernsilicon@gmail.com
+#     /___/______\___\      GitHub:    https://github.com/Arvern-Silicon
+#
+# SPDX-License-Identifier: BSD-3-Clause
+# Full license text is available in the LICENSE file at the repository root.
+#----------------------------------------------------------------------------
+# File Name          : run_vclint
+# Module Description : Run Synopsys VC Static lint on the arvern RTL.
+#----------------------------------------------------------------------------
+# The "light" verilator lint (sim/rtl_sim/run/run_lint) is unrelated and unaffected;
+# This is the signoff-grade flow.
+
+TOP="arvern"
+JOBS=8
+SWEEP_FROM=1
+SWEEP_TO=0
+SWEEP_TIMEOUT=5m
+DO_LANG=0
+RAW=0
+NO_PARAMS=0
+NO_QUIT=0
+RTL_CONFIG=""
+RTL_SWEEP=0
+
+usage() {
+    echo "Usage: $0 [options]"
+    echo "  -top <name>      Top-level design to elaborate (default: arvern)"
+    echo "  -j <count>       Parallel processes for the language checker (default: 8)"
+    echo "  -sweep_from <N>  Resume a sweep at config N (default: 1)"
+    echo "  -sweep_to <N>    Stop after config N (default: 0 = run to the end). With"
+    echo "                   -sweep_from N -sweep_to N, reproduces ONE config in genuine"
+    echo "                   sweep context and leaves its results/ intact for inspection."
+    echo "  -sweep_timeout <D>  Per-config limit before a serial retry (default: 5m)"
+    echo "  -lang            Also run the LANGUAGE_CHECK stage (3356 tags). Much slower"
+    echo "                   and much noisier -- off by default; see rules.tcl"
+    echo "  -rtl_config N|NAME  Elaborate a sweep config: 1-based index (same numbering as"
+    echo "                   run_syn -rtl_config / run_all -rtl_sweep) or a persona name"
+    echo "                   (light, classic, performance, ultra, *-dbg). Results are also"
+    echo "                   snapshotted to results_sweep/<name>/ so runs do not clobber."
+    echo "  -rtl_sweep       Lint EVERY config in the sweep set (same 56 configs as"
+    echo "                   run_syn -rtl_sweep / run_all -rtl_sweep). Writes only a"
+    echo "                   one-line-per-config summary to results_sweep/sweep_summary.log;"
+    echo "                   detailed reports are NOT kept -- re-run -rtl_config N for those"
+    echo "  -no_params       Elaborate with arvern.v's declared parameter defaults instead"
+    echo "                   of run_config.json (a much smaller core -- for comparison only)"
+    echo "  -raw             Ignore rules.tcl and report EVERY enabled rule (firehose;"
+    echo "                   use this to re-derive the noise numbers behind the policy)"
+    echo "  -noquit, -i      Leave vc_static_shell open after the run"
+    echo "  -h, --help       This message"
+    exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -top|--top)                TOP="$2"; shift 2 ;;
+        -j|--j)                    JOBS="$2"; shift 2 ;;
+        -lang|--lang)              DO_LANG=1; shift ;;
+        -raw|--raw)                RAW=1; shift ;;
+        -rtl_config|--rtl_config)  RTL_CONFIG="$2"; shift 2 ;;
+        -rtl_sweep|--rtl_sweep)    RTL_SWEEP=1; shift ;;
+        -sweep_from|--sweep_from)  SWEEP_FROM="$2"; shift 2 ;;
+        -sweep_to|--sweep_to)      SWEEP_TO="$2"; shift 2 ;;
+        -sweep_timeout|--sweep_timeout) SWEEP_TIMEOUT="$2"; shift 2 ;;
+        -no_params|--no_params)    NO_PARAMS=1; shift ;;
+        -noquit|--noquit|-i|--interactive) NO_QUIT=1; shift ;;
+        -h|--help)                 usage 0 ;;
+        *) echo "Unknown option: $1" >&2; usage 1 ;;
+    esac
+done
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+RESULTS="$SCRIPT_DIR/results"
+FLATTEN="$REPO_ROOT/sim/rtl_sim/bin/flatten_filelist.py"
+FILELIST_SRC="$REPO_ROOT/rtl/verilog/filelist.f"
+GEN_PARAMS="$REPO_ROOT/synthesis/synopsys/gen_rtl_params.py"
+RUN_CONFIG="$REPO_ROOT/sim/rtl_sim/run/run_config.json"
+
+if ! command -v vc_static_shell >/dev/null 2>&1; then
+    echo "Error: vc_static_shell not on PATH -- are you inside the Synopsys container?" >&2
+    echo "       Run ./run_vclint_d from the host instead." >&2
+    exit 1
+fi
+[[ -f "$FLATTEN" ]]      || { echo "Error: missing $FLATTEN" >&2; exit 1; }
+[[ -f "$FILELIST_SRC" ]] || { echo "Error: missing $FILELIST_SRC" >&2; exit 1; }
+
+mkdir -p "$RESULTS"
+rm -rf "${RESULTS:?}"/*
+
+# Single source of truth for the RTL file set, shared with sim and synthesis.
+# Flattened in-container so the emitted paths are container-absolute.
+echo "Flattening $FILELIST_SRC ..."
+python3 "$FLATTEN" --format raw "$FILELIST_SRC" "$RESULTS/arvern_flat.f" || exit 1
+
+export VCLINT_TOP="$TOP"
+export VCLINT_FILELIST="$RESULTS/arvern_flat.f"
+export VCLINT_STAGES="Structural_Check Netlist Quick_Lint"
+export VCLINT_JOBS="$JOBS"
+export VCLINT_DO_LANG="$DO_LANG"
+# Elaboration parameters come from run_config.json -- the same source sim and
+# synthesis use -- so all three flows lint/build the same core. Without this
+# the design elaborates with arvern.v's declared parameter defaults, which are
+# a much smaller configuration (no B extension, base compressed only, no debug
+# subsystem, no NMI/CCSR/HPM).
+export VCLINT_PARAMS_FILE=""
+if [[ $NO_PARAMS -eq 0 ]]; then
+    if [[ -n "$RTL_CONFIG" ]]; then
+        echo "Generating RTL parameters for sweep config '${RTL_CONFIG}'..."
+        python3 "$GEN_PARAMS" --config "$RUN_CONFIG" --rtl-config "$RTL_CONFIG" \
+                --output "$RESULTS/rtl_params.tcl" >/dev/null || {
+            echo "Error: gen_rtl_params.py failed for -rtl_config '${RTL_CONFIG}'" >&2; exit 1; }
+    else
+        echo "Generating RTL parameters from run_config.json defaults..."
+        python3 "$GEN_PARAMS" --config "$RUN_CONFIG" --output "$RESULTS/rtl_params.tcl" >/dev/null || {
+            echo "Error: gen_rtl_params.py failed" >&2; exit 1; }
+    fi
+    VCLINT_PARAMS_FILE="$RESULTS/rtl_params.tcl"
+fi
+export VCLINT_RULES=""
+export VCLINT_WAIVERS=""
+[[ $RAW -eq 0 && -f "$SCRIPT_DIR/rules.tcl"   ]] && VCLINT_RULES="$SCRIPT_DIR/rules.tcl"
+[[            -f "$SCRIPT_DIR/waivers.tcl" ]] && VCLINT_WAIVERS="$SCRIPT_DIR/waivers.tcl"
+
+if [[ $DO_LANG -eq 1 ]]; then
+    export VCLINT_STAGES="Language_Check Structural_Check Netlist Quick_Lint"
+fi
+
+# ---------------------------------------------------------------------------
+# SWEEP MODE: re-invoke this script once per config and keep only the summary.
+# Detailed reports are deliberately not retained -- if a config looks wrong,
+# re-run it on its own with -rtl_config N to get the full report.
+# ---------------------------------------------------------------------------
+if [[ $RTL_SWEEP -eq 1 ]]; then
+    [[ -n "$RTL_CONFIG" ]] && { echo "Error: -rtl_sweep and -rtl_config are mutually exclusive" >&2; exit 1; }
+    SWEEP_DIR="$SCRIPT_DIR/results_sweep"
+    LOG="$SWEEP_DIR/sweep_summary.log"
+    mkdir -p "$SWEEP_DIR"
+
+    CONFIGS=()
+    while IFS= read -r line; do CONFIGS+=("$line"); done \
+        < <(python3 "$GEN_PARAMS" --config "$RUN_CONFIG" --list-configs | awk -F'\t' '$1 ~ /^[0-9]+$/')
+    total=${#CONFIGS[@]}
+
+    # Resuming (-sweep_from N) appends to the existing summary instead of
+    # truncating it, so rows already collected survive.
+    if [[ $SWEEP_FROM -le 1 ]]; then
+        { echo "# arvern VC Static lint sweep -- $total configs"
+          echo "# stages: $VCLINT_STAGES"
+          printf '#%4s  %-40s %6s %6s %6s %6s %8s  %s\n' idx label err warn info stale waived tags
+        } > "$LOG"
+    else
+        echo "# resumed at config $SWEEP_FROM" >> "$LOG"
+    fi
+
+    echo "================================================================"
+    echo " arvern VC STATIC LINT SWEEP: $total configs"
+    echo "   summary -> lint/vc_static/results_sweep/sweep_summary.log"
+    echo "================================================================"
+
+    # NOTE: ${DO_LANG:+-lang} would expand for DO_LANG=0 too (non-empty), which
+    # silently ran the whole sweep with the language stage on. Use a numeric test.
+    LANG_FLAG=""
+    [[ $DO_LANG -eq 1 ]] && LANG_FLAG="-lang"
+
+    SWEEP_START=$SECONDS
+    fails=0
+    for entry in "${CONFIGS[@]}"; do
+        idx="${entry%%	*}"; label="${entry#*	}"
+        [[ $idx -lt $SWEEP_FROM ]] && continue
+        [[ $SWEEP_TO -gt 0 && $idx -gt $SWEEP_TO ]] && break
+
+        # The parallel language checker deadlocks intermittently under this
+        # build: vcst goes idle after "Structural Check Done" and never returns,
+        # which strands the whole sweep. Bound each config, then retry serially
+        # (-j 1) since the hang has only ever been seen with -j > 1.
+        out=$(timeout -k 10 "${SWEEP_TIMEOUT}" env VCLINT_NO_SNAPSHOT=1 "$0" -rtl_config "$idx" $LANG_FLAG 2>&1)
+        if [[ $? -eq 124 ]]; then
+            echo "  [  retry] $label: exceeded ${SWEEP_TIMEOUT}, retrying with -j 1" >&2
+            rm -rf "$SCRIPT_DIR/results/vcst_rtdb"
+            out=$(timeout -k 10 "${SWEEP_TIMEOUT}" env VCLINT_NO_SNAPSHOT=1 "$0" -rtl_config "$idx" $LANG_FLAG -j 1 2>&1)
+            [[ $? -eq 124 ]] && { rm -rf "$SCRIPT_DIR/results/vcst_rtdb"; out=""; }
+        fi
+        counts=$(printf '%s\n' "$out" | awk '/^VC Lint /{
+                     for(i=1;i<=NF;i++){split($i,a,"=");
+                     if(a[1]=="err")e=a[2]; if(a[1]=="warn")w=a[2];
+                     if(a[1]=="info")n=a[2]; if(a[1]=="waived")v=a[2];
+                     if(a[1]=="stale")st=a[2]}
+                     printf "%s %s %s %s %s", e, w, n, st, v; exit}')
+        [[ -z "$counts" ]] && { counts="- - - - -"; fails=$((fails+1)); }
+        # non-zero tags, compact: TAG=count,TAG=count
+        tags=$(printf '%s\n' "$out" | awk '/Top tags/{t=1;next} t && NF>=3 && $3+0>0 {printf "%s%s=%s", (n++?",":""), $2, $3}')
+        printf '%5s  %-40s %6s %6s %6s %6s %8s  %s\n' "$idx" "$label" $counts "${tags:--}" >> "$LOG"
+        printf '  [%2s/%2s] %-40s %s\n' "$idx" "$total" "$label" "$(echo $counts | awk '{print "err="$1" warn="$2" stale="$4" waived="$5}')"
+    done
+
+    EL=$(( SECONDS - SWEEP_START ))
+    echo ""
+    echo "================================================================"
+    cat "$LOG"
+    echo "================================================================"
+    printf ' Sweep done: %d configs in %dh %dm %ds' "$total" $((EL/3600)) $(((EL%3600)/60)) $((EL%60))
+    [[ $fails -gt 0 ]] && printf '  (%d produced no report)' "$fails"
+    echo ""
+    exit 0
+fi
+
+echo "================================================================"
+echo " arvern VC STATIC LINT"
+echo "   top          : $TOP"
+echo "   stages       : $VCLINT_STAGES"
+echo "   config       : ${RTL_CONFIG:-<run_config.json defaults>}"
+echo "   params       : ${VCLINT_PARAMS_FILE:-<arvern.v defaults -- run_config.json BYPASSED>}"
+echo "   rule policy  : ${VCLINT_RULES:-<none -- RAW MODE>}"
+echo "   waivers      : ${VCLINT_WAIVERS:-<none>}"
+echo "================================================================"
+
+START_TIME=$SECONDS
+
+# vcst scatters WORK/, vcst_rtdb/, clog*, novas.* into its cwd -- run it from
+# results/ so all of it lands in the gitignored output dir.
+SHELL_ARGS=(-mode64 -f "$SCRIPT_DIR/vc_lint.tcl")
+[[ $NO_QUIT -eq 1 ]] && SHELL_ARGS=(-mode64 -f "$SCRIPT_DIR/vc_lint.tcl" -i)
+
+( cd "$RESULTS" && vc_static_shell "${SHELL_ARGS[@]}" ) 2>&1 | tee "$RESULTS/vclint.log"
+rc=${PIPESTATUS[0]}
+
+ELAPSED=$(( SECONDS - START_TIME ))
+
+print_lint_summary() {
+    local summary="$RESULTS/report.lint_summary.txt"
+    local fatals=0 errors=0 warnings=0 infos=0 compressed=0 waived=0
+
+    if [[ -f "$summary" ]]; then
+        # Management Summary columns are NOT fixed: a "Waived" column appears
+        # only once at least one waiver matched, which shifts "Compressed".
+        # So map values via the header row rather than by position. Take the
+        # first "Total" after the header -- the Tree Summary has its own.
+        # Field comparisons only: the container's awk is mawk, which does not
+        # support POSIX [[:space:]] bracket expressions.
+        local -a v
+        v=( $(awk '/Management Summary/ {inms=1}
+                   inms && /Fatals/ {
+                       nc=0; for (i=1;i<=NF;i++) if ($i!="Stage" && $i!="Family") cols[++nc]=$i
+                   }
+                   inms && nc && $1=="Total" && $2 ~ /^[0-9]+$/ {
+                       for (i=2;i<=NF;i++) val[cols[i-1]]=$i
+                       printf "%d %d %d %d %d %d\n", val["Fatals"], val["Errors"], \
+                              val["Warnings"], val["Infos"], val["Waived"], val["Compressed"]
+                       exit
+                   }' "$summary") )
+        fatals=${v[0]:-0}; errors=${v[1]:-0}; warnings=${v[2]:-0}
+        infos=${v[3]:-0}; waived=${v[4]:-0}; compressed=${v[5]:-0}
+    fi
+    # Waivers that matched nothing this run. vc_lint.tcl calls
+    # `waive_hdl -not_applied` after check_hdl; each entry it lists is a waiver
+    # whose filter found no violation -- i.e. stale, or (for a conditional
+    # waiver) registered in a configuration where it does not apply.
+    local stale=0
+    if [[ -f "$RESULTS/vclint.log" ]]; then
+        stale=$(awk '/waivers that matched nothing/ {f=1; next}
+                     f && $1=="Waiver" && $2==":" {c++}
+                     END {print c+0}' "$RESULTS/vclint.log")
+        stale=${stale:-0}
+    fi
+
+    local h=$((ELAPSED/3600)) m=$(((ELAPSED%3600)/60)) s=$((ELAPSED%60))
+    # "compressed" = near-identical violations folded into a reported one by
+    # compress_hdl. Raw total = reported + compressed.
+    printf "VC Lint %s: fatal=%s err=%s warn=%s info=%s stale=%s waived=%s  (%dh %dm %ds)\n" \
+        "$TOP" "$fatals" "$errors" "$warnings" "$infos" "$stale" "$waived" "$h" "$m" "$s"
+    printf "            reported=%s  compressed=%s  raw total=%s\n" \
+        "$((fatals + errors + warnings + infos))" "$compressed" \
+        "$((fatals + errors + warnings + infos + compressed))"
+
+    # Tree Summary is already a per-tag histogram -- read it rather than
+    # re-counting report.lint_full.txt, whose per-tag output is limit-truncated.
+    if [[ -f "$summary" ]]; then
+        echo ""
+        echo "Top tags (severity / tag / count):"
+        awk '/Tree Summary/ {ints=1}
+             ints && ($1=="error"||$1=="warning"||$1=="fatal"||$1=="info") {
+                 printf "  %-8s %-38s %6s\n", $1, $3, $4
+             }' "$summary" | sort -k3 -rn | head -20
+    fi
+}
+
+echo ""
+echo "================================================================"
+echo " Summary"
+echo "================================================================"
+if [[ ! -f "$RESULTS/report.lint_summary.txt" ]]; then
+    echo "ERROR: no report produced -- see $RESULTS/vclint.log"
+    exit "${rc:-1}"
+fi
+print_lint_summary
+echo ""
+if [[ -n "$RTL_CONFIG" && "${VCLINT_NO_SNAPSHOT:-0}" != "1" ]]; then
+    snap="$SCRIPT_DIR/results_sweep/$(echo "$RTL_CONFIG" | sed -e 's/[(),]//g' -e 's/[ \/=:]/_/g')"
+    mkdir -p "$snap"; rm -rf "${snap:?}"/*
+    cp "$RESULTS"/report.*.txt "$RESULTS"/rtl_params.tcl "$RESULTS"/vclint.log "$snap/" 2>/dev/null
+    echo " Snapshot: lint/vc_static/results_sweep/$(basename "$snap")/"
+fi
+echo " Reports in: lint/vc_static/results/"
+echo "   report.lint_summary.txt    management + tree summary"
+echo "   report.lint_full.txt       every violation, sorted, with file:line"
+echo "   report.lint_by_family.txt  per-family breakdown"
+echo "   report.lint_waived.txt     waived violations only"
+echo "================================================================"
+
+exit "$rc"

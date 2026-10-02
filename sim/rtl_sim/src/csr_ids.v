@@ -64,29 +64,11 @@ initial begin
 
     RV32I_EN      = (RV32E_EN    == 0) ? 1'b1 : 1'b0;
 
-    // Compute MIMPID based on arv_csr_ids.v formula
-    // NOTE: keep [31:20] in sync with the RTL_VERSION localparam in arvern.v -- bump together on each RTL release.
-    expected_mimpid = {12'h000,                // [31:20] :  RTL release version (RTL_VERSION, 12 bits)
-                       ZIHPM_NR[3:0],          // [19:16] :  Zihpm HPM counter count (0-8)
-                       ZICNTR_EN[0],           // [15]    :  Zicntr extension enable (cycle, time, instret)
-                       SINGLE_CYCLE_BRANCH[0], // [14]    :  1=zero-bubble taken branch (max IPC); 0=one-bubble (max Fmax)
-                       NMI_EN[0],              // [13]    :  Smrnmi extension enable (resumable NMI)
-                       CCSR_EN[0],             // [12]    :  Custom-CSR available
-
-                       // [11:10] : Divider type    (0=none, 1=12cyc, 2=17cyc, 3=33cyc)
-                       (({2{DIV_12C_EN}} & 2'd1) | ({2{DIV_17C_EN}} & 2'd2) | ({2{DIV_33C_EN}} & 2'd3)),
-                       // [ 9: 8] : Multiplier type (0=none, 1=1cyc,  2=4cyc,  3=16cyc)
-                       (({2{MUL_1C_EN }} & 2'd1) | ({2{MUL_4C_EN }} & 2'd2) | ({2{MUL_16C_EN}} & 2'd3)),
-
-                       ZCMT_EN,             // [ 7]    :  Zcmt extension enable
-                       ZCMP_EN,             // [ 6]    :  Zcmp extension enable
-                       ZCB_EN,              // [ 5]    :  Zcb extension enable
-                       ZCA_EN,              // [ 4]    :  Zca extension enable
-
-                       ASYNC_RST_EN[0],     // [ 3]    :  Reset architecture (1=asynchronous, 0=synchronous)
-                       ZBS_EN,              // [ 2]    :  Zbs extension enable
-                       ZBA_EN,              // [ 1]    :  Zba extension enable
-                       ZBB_EN               // [ 0]    :  Zbb extension enable
+    // MIMPID is now a pure version register: {major, minor, patch, reserved}, one byte each.
+    // The build configuration it used to carry moved to marv_cfg (0xFFF).
+    // NOTE: keep in sync with the RTL_VERSION localparam in arvern.v -- bump together each release.
+    expected_mimpid = {24'h010000,  // [31: 8] : v1.0.0 -- {major[7:0], minor[7:0], patch[7:0]}
+                       8'h00        // [ 7: 0] : reserved
                       };
 
     // Compute MISA based on arv_csr_ids.v formula (lines 162-188)
@@ -131,9 +113,9 @@ initial begin
     $display("  MUL_TYPE       = %0d (1=1cyc, 2=4cyc, 3=16cyc)", MUL_TYPE);
     $display("  DIV_TYPE       = %0d (1=12cyc, 2=17cyc, 3=33cyc)", DIV_TYPE);
     $display("  CCSR_EN        = %0d", CCSR_EN);
-    $display("  NMI_EN         = %0d", NMI_EN);
+    $display("  DEBUG_EN       = %0d", DEBUG_EN);
     $display("  SINGLE_CYCLE_BRANCH = %0d (1=zero-bubble taken branch / max IPC, 0=one-bubble / max Fmax)", SINGLE_CYCLE_BRANCH);
-    $display("  MVENDORID      = 0x%08h (mvendorid 0xF11; integration-set parameter; firmware csrr must read this back)", MVENDORID);
+    $display("  MVENDORID      = 0x000008fb (mvendorid 0xF11; core-owned localparam in arv_csr_ids.v)");
     $display("");
     $display("Derived enables:");
     $display("  RV32I_EN       = %0d", RV32I_EN);
@@ -219,16 +201,16 @@ initial
       $display("Waiting for the firmware...");
       @(probes_cpu.x29==32'hdeadbeef);
 
-	   check_cpu_reg(1,  MVENDORID);       // MVENDORID   -->  Vendor ID: must equal the MVENDORID
-                                               //                  parameter the testbench instantiated the
-                                               //                  DUT with (verifies the integration
-                                               //                  parameter propagates arvern -> csr_top
-                                               //                  -> csr_ids -> CSR read -> firmware csrr).
- 	   check_cpu_reg(2,  32'h00000000);    // MARCHID     -->  Architecture ID: core-owned (arvern.v
+	   check_cpu_reg(1,  32'h000008fb);    // MVENDORID   -->  Vendor ID: core-owned (arv_csr_ids.v
+                                               //                  MVENDORID localparam = ArvernSilicon's
+                                               //                  JEDEC ID, NOT an integration parameter).
+                                               //                  JEP106 bank 18 (17 << 7 | 0x7b); keep
+                                               //                  this literal in sync with that localparam.
+ 	   check_cpu_reg(2,  32'h00000036);    // MARCHID     -->  Architecture ID 54: core-owned (arv_csr_ids.v
                                                //                  MARCHID localparam, NOT an integration
-                                               //                  parameter). 0 until RISC-V International
-                                               //                  allocates an ID; keep this literal in
-                                               //                  sync with that localparam if it changes.
+                                               //                  parameter). Allocated to aRVern by RISC-V
+                                               //                  International; keep this literal in sync
+                                               //                  with that localparam if it changes.
  	   check_cpu_reg(3,  expected_mimpid); // MIMPID      -->  Implementation ID (computed from parameters)
  	   check_cpu_reg(4,  32'h00000023);    // MHARTID     -->  Hardware thread ID.
 	   check_cpu_reg(5,  32'h00000000);    // MCONFIGPTR  -->  Pointer to configuration data structure.

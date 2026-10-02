@@ -28,6 +28,8 @@
 #   a0 = 1  ->  return to M-mode (set MPP = 11)
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -238,6 +240,7 @@ s_handler_done:
     #=================================================================
  _start:
     li   sp, 0x80010000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000        # Scratchpad base
 
     # Zero scratchpad
@@ -265,6 +268,11 @@ s_handler_done:
     la   t0, s_trap_handler
     csrw stvec, t0
 
+    # Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+    # resets to 0, so boot code must set mnstatus.NMIE=1 before any
+    # ordinary interrupt can be delivered. Smrnmi is unconditional.
+    csrsi 0x744, 8              # mnstatus.NMIE = 1
+
     # Initialize callee-saved registers
     li   s2, 0xAAAAAAAA
     li   s3, 0xBBBBBBBB
@@ -287,6 +295,9 @@ s_handler_done:
 
     # Enable MSTATUS.MIE (bit 3)
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Clear m_trap_handled flag
@@ -474,6 +485,70 @@ wait_p5:
 
     # Signal testbench: Phase 5 complete (deassert irq_platform)
     li   x31, 0x55555555
+
+
+    #=================================================================
+    # PHASE 6: Sweep every platform line
+    #   Phases 2-5 only ever drove lines 0 and 5, so the remaining 14
+    #   inputs and their MCAUSE encodings were never exercised. Walk all
+    #   16: irq_platform[N] -> cause 16+N -> MCAUSE = 0x80000010 + N.
+    #   Result for line N lands at 0x80 + N*4.
+    #
+    #   a1 holds the index -- the trap handler saves/restores only t0-t4,
+    #   and s2-s6 are the preservation canaries, so neither may be used.
+    #=================================================================
+    # Phase 5 leaves mie[21] enabled and mip[21] pending (its cleanup clears
+    # mideleg/sie/sip only). That stale interrupt would fire the moment this
+    # phase touches mie, and its handler would set m_trap_handled behind our
+    # back -- so drain every platform enable and pending bit first.
+    li   t0, 0xFFFF0000
+    csrc mie, t0
+    csrc mip, t0
+
+    li   a1, 0
+
+p6_loop:
+    li   t0, 16
+    bge  a1, t0, p6_done
+
+    # Clear the flag BEFORE enabling, otherwise a trap taken by the enabling
+    # instruction itself sets it and the clear below erases the only wake-up.
+    sw   zero, 0x10(s1)           # clear m_trap_handled
+
+    # Enable MIE bit (16 + N)
+    li   t0, 1
+    addi t1, a1, 16
+    sll  t0, t0, t1
+    csrs mie, t0
+
+    li   t0, 0x8
+    csrs mstatus, t0              # MSTATUS.MIE
+
+    # Signal testbench: assert irq_platform[N]
+    li   t0, 0x60000000
+    or   t0, t0, a1
+    mv   x31, t0
+
+p6_wait:
+    lw   t0, 0x10(s1)
+    beqz t0, p6_wait
+
+    # Record MCAUSE for this line at 0x80 + N*4
+    slli t2, a1, 2
+    add  t2, t2, s1
+    lw   t0, 0x04(s1)
+    sw   t0, 0x80(t2)
+
+    # Signal testbench: deassert irq_platform[N]
+    li   t0, 0x61000000
+    or   t0, t0, a1
+    mv   x31, t0
+
+    addi a1, a1, 1
+    j    p6_loop
+
+p6_done:
+    li   x31, 0x66666666
 
 
     #=================================================================

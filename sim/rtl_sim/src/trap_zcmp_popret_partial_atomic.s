@@ -58,6 +58,9 @@
 #   0x14: captured ra
 #=========================================================================
 
+.equ MNSTATUS,       0x744
+.equ MNCAUSE,        0x742
+
 main:
     j _start
 
@@ -67,6 +70,23 @@ main:
     # CANNOT push to sp. Swap sp with mscratch (which the firmware
     # pre-loaded with a known-good trap-stack base).
     #=================================================================
+    #=================================================================
+    # RNMI HANDLER -- the load access fault is reported here now.
+    # Touches no stack: sp straddles unmapped space at fault time.
+    #=================================================================
+    .align 2
+nmi_handler:
+    li    s1, 0x80000000
+    sw    sp, 0x10(s1)           # faulting-context sp -- PRIMARY DISCRIMINATOR
+    sw    ra, 0x14(s1)           # and ra: cm.popret must not partially commit
+    lw    t0, 0x24(s1)
+    addi  t0, t0, 1
+    sw    t0, 0x24(s1)
+    csrr  t0, MNCAUSE
+    sw    t0, 0x28(s1)
+    lw    zero, 0x28(s1)
+    .word 0x70200073             # mnret
+
     .align 2
 trap_handler:
     csrrw sp, mscratch, sp        # swap: sp ↔ mscratch
@@ -127,10 +147,17 @@ _start:
     sw   t0, 0x0C(s1)
     sw   t0, 0x10(s1)
     sw   t0, 0x14(s1)
+    sw   t0, 0x24(s1)
+    sw   t0, 0x28(s1)
 
     # Install trap handler
     la   t0, trap_handler
-    csrw mtvec, t0
+    csrw mtvec, t0               # NEGATIVE CONTROL: must never be entered
+
+    la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
+    sw   t0, 0x20(s1)
+    lw   zero, 0x20(s1)
 
     # Configure mscratch as the trap-handler stack base (inside SRAM,
     # below the working sp we'll use for the test, to avoid overlap)
@@ -150,7 +177,16 @@ _start:
     li   s2, 0xA2A2A2A2
     li   ra, 0xFEEDFACE
 
-    li   x31, 0x11111111
+    li   x31, 0x11111111          # tb now programs nmi_vector
+
+    li   t0, 20
+wait_vec:
+    addi t0, t0, -1
+    bnez t0, wait_vec
+
+    csrsi MNSTATUS, 8             # mnstatus.NMIE = 1 -- REQUIRED for delivery
+
+    li   x31, 0x21212121          # NMIE armed
 
     #=================================================================
     # PHASE 2: cm.popret with sp positioned so the LAST load (ra @ sp+32)
@@ -173,13 +209,11 @@ _start:
     # rlist=7 → pop ra,s0,s1,s2 ; stack_adj_base=16, +spimm*16=32 → 48 bytes
     .hword 0xBE7A                  # cm.popret rlist=7 spimm=2
 
-    # If we reach here pre-fix, the cm.popret partial-state bug presented:
-    # sp got updated but ra didn't (and execution somehow continued — it
-    # may not, the trap handler redirects to recovery_after_popret).
-    li   x31, 0xBADBAD01
+    # The RNMI aborts the sequence; mnret resumes at the resume point, so
+    # control reaches here normally.
 
 recovery_after_popret:
-    # Trap handler redirected here. Restore working sp + scratchpad base.
+    # Restore working sp + scratchpad base.
     li   sp, 0x8000F000
     li   s1, 0x80000000
 

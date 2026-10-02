@@ -27,6 +27,8 @@
 #   Pre-fix: 0 traps. Post-fix: 3 traps, each MCAUSE=2.
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -93,6 +95,7 @@ _trap_return:
 
 _start:
     li   sp, 0x8000F000           # safe SP inside 64KB SRAM
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000
 
     # Zero scratchpad

@@ -32,7 +32,7 @@ integer allow_peripheral_accesses;
 reg [31:0] csr_count;
 reg [31:0] time_lo;
 
-`define SPAD(byte_off) (byte_off/4)
+`define SPAD(byte_off) ((byte_off)/4)
 
 initial
    begin
@@ -63,11 +63,13 @@ initial
 
       //=================================================================
       // Wait for firmware sync: x31=0x11111111 fires just before the
-      // csrr TIME instruction.  Hold time_gnt=0 for 5 more clocks to
-      // guarantee at least 5 CSR stall cycles, then release so the
-      // harness can complete the grant.
+      // csrr TIME instruction.  Once the CSR requests the time value, hold
+      // time_gnt=0 for 5 more clocks to guarantee at least 5 CSR stall
+      // cycles (fetch wait states may delay the csrr after the sync), then
+      // release so the harness can complete the grant.
       //=================================================================
       @(probes_cpu.x31 == 32'h11111111);
+      wait (time_req === 1'b1);
       repeat(5) @(posedge free_clk);
       release time_gnt;   // harness takes over and will grant within 0-5 more cycles
 

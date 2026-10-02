@@ -40,6 +40,15 @@ fi
 #                         Start verilog simulation                            #
 ###############################################################################
 
+# The bench writes its verdict (PASSED / FAILED / SKIPPED) to sim_result.txt;
+# a run that wrote FAILED, or nothing at all, exits 1 even though $finish exits 0.
+rm -f sim_result.txt
+sim_status () {
+    [ "$1" -ne 0 ] && return "$1"
+    grep -qxE "PASSED|SKIPPED" sim_result.txt 2>/dev/null || return 1
+    return 0
+}
+
 if [ "${VERILOG_SIMULATOR:-iverilog}" = iverilog ]; then
 
     rm -rf simv
@@ -74,6 +83,8 @@ if [ "${VERILOG_SIMULATOR:-iverilog}" = iverilog ]; then
     else
         ./simv
     fi
+    sim_status $?
+    exit $?
 
 elif [ "${VERILOG_SIMULATOR}" = verilator ]; then
 
@@ -90,8 +101,20 @@ elif [ "${VERILOG_SIMULATOR}" = verilator ]; then
     if [ $NOTRACE -eq 1 ]; then
         DEFINES="$DEFINES -DNOTRACE"
     fi
+    # Extra defines arrive in Icarus's spaced form ("-D NAME"); Verilator only accepts
+    # them attached ("-DNAME") and otherwise takes NAME as a source file name.
     if [ -n "${SIMULATION_EXTRA_DEFINES:-}" ]; then
-        DEFINES="$DEFINES $SIMULATION_EXTRA_DEFINES"
+        XD=""; want_name=0
+        for tok in $SIMULATION_EXTRA_DEFINES; do
+            if [ "$tok" = "-D" ]; then
+                want_name=1
+            elif [ $want_name -eq 1 ]; then
+                XD="$XD -D$tok"; want_name=0
+            else
+                XD="$XD $tok"
+            fi
+        done
+        DEFINES="$DEFINES $XD"
     fi
 
     # Verilator doesn't support nested -f includes, so flatten the file list
@@ -110,7 +133,37 @@ elif [ "${VERILOG_SIMULATOR}" = verilator ]; then
     # --trace: Enable VCD waveform tracing (unless NODUMP)
     # -Wno-fatal: Convert fatal warnings to warnings (for compatibility)
     # --top: Specify top module
-    VERILATOR_OPTS="--binary --timing -Wno-fatal --top $1"
+    VERILATOR_OPTS="--binary --timing --x-initial unique -Wno-fatal --top $1"
+
+    # Coverage (SIMULATION_COVERAGE=1, set by run_all -cov / run -cov). Each run drops
+    # its coverage.dat into the shared pool named after the test+variant, so a whole
+    # regression accumulates into one database.
+    if [ "${SIMULATION_COVERAGE:-0}" = "1" ]; then
+        VERILATOR_OPTS="$VERILATOR_OPTS --coverage-line"
+        DEFINES="$DEFINES -DARV_COV_RESET_ZERO"   # tb_arvern.v zeroes the counters once reset is applied
+        # Toggle is ~85% of the coverage points (one per BIT), and instrumenting it
+        # dominates C++ compile time. SIMULATION_COV_TOGGLE=0 drops it when line+branch
+        # is enough -- much faster, at the cost of the per-signal toggle view.
+        if [ "${SIMULATION_COV_TOGGLE:-1}" = "1" ]; then
+            # Toggle-cover signals of any width (Verilator skips those wider than 256 bits by default).
+            VERILATOR_OPTS="$VERILATOR_OPTS --coverage-toggle --coverage-max-width 65536"
+            # Corrected toggle macro for vectors wider than 64 bits (see cov_vlfix.py).
+            python3 "$(dirname "${BASH_SOURCE[0]}")/cov_vlfix.py" obj_dir
+        fi
+        # The instrumented C++ dominates the build and each run simulates for well
+        # under a second, so an unoptimised compile is the faster trade.
+        VERILATOR_OPTS="$VERILATOR_OPTS -MAKEFLAGS OPT_FAST=-O0 -MAKEFLAGS OPT_SLOW=-O0 -MAKEFLAGS OPT_GLOBAL=-O0"
+        # Instrument the DUT only (rtl/verilog): the testbench, the bench SoC IPs and the
+        # memory models are not reported, and instrumenting them doubles the C++ to compile.
+        # SIMULATION_COV_SCOPE=all instruments the whole bench.
+        if [ "${SIMULATION_COV_SCOPE:-dut}" = "dut" ]; then
+            COV_RTL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../rtl/verilog" && pwd)"
+            # SIMULATION_COV_DIRS (absolute, space-separated) instruments other RTL instead,
+            # e.g. an IP of the bench SoC seen through the core regression.
+            python3 "$(dirname "${BASH_SOURCE[0]}")/cov_scope.py" cov_scope.vlt "$FLATTENED_FILELIST" ${SIMULATION_COV_DIRS:-$COV_RTL_DIR}
+            VERILATOR_OPTS="$VERILATOR_OPTS cov_scope.vlt"
+        fi
+    fi
 
     # Add tracing if not disabled
     if [ $NODUMP -eq 0 ]; then
@@ -128,7 +181,15 @@ elif [ "${VERILOG_SIMULATOR}" = verilator ]; then
 
     # Run the generated executable
     if [ -f obj_dir/V$1 ]; then
-        ./obj_dir/V$1
+        rm -f coverage.dat
+        ./obj_dir/V$1 +verilator+rand+reset+1
+        rc=$?
+        if [ "${SIMULATION_COVERAGE:-0}" = "1" ] && [ -f coverage.dat ]; then
+            mkdir -p "${SIMULATION_COV_DATS:-.}"
+            mv coverage.dat "${SIMULATION_COV_DATS:-.}/cov_${SIMULATION_COV_TAG:-unknown}.dat"
+        fi
+        sim_status $rc
+        exit $?
     else
         echo "ERROR: Verilator compilation failed - executable not found"
         exit 1

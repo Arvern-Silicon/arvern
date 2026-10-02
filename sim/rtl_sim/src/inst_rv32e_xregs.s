@@ -32,19 +32,19 @@
 #   mandated by the base ISA.)
 #
 #   (2) The architectural register file IS RV32E-aware: a read of an
-#   upper register x16..x31 that is NOT satisfied by pipeline
-#   forwarding yields 0 (there is no architectural storage for it).
+#   upper register x16..x31 yields 0 (there is no architectural
+#   storage for it).
 #
-#   (3) The decoder/forwarding network is NOT RV32E-aware: a write to an
-#   upper register x_n (16<=n<=31) IMMEDIATELY followed by a read of
-#   THE SAME x_n forwards the just-written value through the bypass
-#   path. The value is a pure forwarding artefact -- it is NOT
-#   persisted anywhere (no architectural x_n). Once the write leaves
-#   the forwarding window, a later read of the same x_n reads 0.
+#   (3) The forwarding network is ALSO RV32E-aware: a write to an upper
+#   register x_n (16<=n<=31) IMMEDIATELY followed by a read of THE
+#   SAME x_n still reads 0 -- the in-flight write data does NOT leak
+#   through the decode-port forwarding bypass. The write is invisible
+#   EVERYWHERE: dropped at the flop AND gated out of the bypass
+#   comparators.
 #
-#   In one line: regfile is RV32E-aware (non-forwarded read = 0) but
-#   decode/forwarding is NOT (adjacent write->read of the same upper reg
-#   forwards the written value; the value is not persisted).
+#   In one line: a reference to x16..x31 reads 0 in ALL windows,
+#   including the same-cycle forwarding bypass; writes to x16..x31 are
+#   dropped and never observable.
 #
 #   Because the rv32e/ilp32e assembler REJECTS any mnemonic naming x16..x31
 #   ("Error: illegal operands"), every instruction that names an upper
@@ -55,14 +55,14 @@
 #
 #   .word 0x12300813  addi x16, x0,  0x123  ; write -> non-existent x16
 #   .word 0x00080293  addi x5,  x16, 0      ; read x16 immediately after
-#   ;   -> FORWARDED -> x5=0x123
+#   ;   -> bypass gated -> x5=0
 #   .word 0x000C0313  addi x6,  x24, 0      ; read x24, no in-flight write
 #   ;   -> regfile -> x6=0
 #   .word 0x000F8393  addi x7,  x31, 0      ; read x31 before any write
 #   ;   -> regfile -> x7=0
 #   .word 0x45600F93  addi x31, x0,  0x456  ; write -> non-existent x31
 #   .word 0x000F8413  addi x8,  x31, 0      ; read x31 immediately after
-#   ;   -> FORWARDED -> x8=0x456
+#   ;   -> bypass gated -> x8=0
 #   <several x0..x15 NOPs -- push the x16 write out of the fwd window>
 #----------------------------------------------------------------------------
 
@@ -150,6 +150,9 @@ _start:
     la   t0, trap_handler
     csrw mtvec, t0
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     li   x15, 0x11111111       # <-- SYNC A: handler installed,
@@ -171,8 +174,9 @@ _start:
     # (1) write 0x123 to non-existent x16 -> dropped, no trap
     .word 0x12300813           # addi x16, x0, 0x123
 
-    # (2) read x16 IMMEDIATELY after the write -> value is FORWARDED
-    #     through the bypass path: x5 == 0x00000123
+    # (2) read x16 IMMEDIATELY after the write -> the forwarding bypass
+    #     is RV32E-gated: the in-flight write data does NOT leak, so
+    #     x5 == 0 (reads 0 even in the same-cycle forwarding window)
     .word 0x00080293           # addi x5,  x16, 0
 
     # (3) read x24 -- NO in-flight write to x24 -> regfile yields 0:
@@ -186,16 +190,16 @@ _start:
     # (5) write 0x456 to non-existent x31 -> dropped, no trap
     .word 0x45600F93           # addi x31, x0, 0x456
 
-    # (6) read x31 IMMEDIATELY after its write -> value is FORWARDED:
-    #     x8 == 0x00000456
+    # (6) read x31 IMMEDIATELY after its write -> bypass is RV32E-gated:
+    #     x8 == 0 (no leak in the forwarding window)
     .word 0x000F8413           # addi x8,  x31, 0
 
-    # (7) DISCRIMINATOR proving non-persistence. Several x0..x15-only
-    #     NOPs (none touch x16) push the (1) write to x16 well out of
-    #     the forwarding window. With NO intervening write to x16, the
-    #     subsequent read of x16 must come from the (RV32E-aware)
-    #     register file -> x9 == 0, even though step (2) saw 0x123.
-    #     This cleanly separates "forwarded" from "persisted".
+    # (7) OUT-OF-WINDOW read. Several x0..x15-only NOPs (none touch
+    #     x16) push the (1) write to x16 well out of the forwarding
+    #     window. With NO intervening write to x16, the subsequent read
+    #     of x16 comes from the (RV32E-aware) register file -> x9 == 0.
+    #     Together with (2)/(6) this shows x16..x31 reads 0 in ALL
+    #     windows -- bypass and flop alike.
     nop                        # addi x0,x0,0  (0x00000013)
     nop
     nop

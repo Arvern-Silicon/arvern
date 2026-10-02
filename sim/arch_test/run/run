@@ -1,0 +1,95 @@
+#!/bin/bash
+#----------------------------------------------------------------------------
+#          _    _           Family:    aRVern System IPs
+#         / \__/ \          Script:    run
+#        /   /\   \         --------------------------------------------
+#    ===/   /=========      Copyright: (c) 2026, aRVern-dev
+#      /   / RV \   \       Contact:   arvernsilicon@gmail.com
+#     /___/______\___\      GitHub:    https://github.com/Arvern-Silicon
+#
+# SPDX-License-Identifier: BSD-3-Clause
+# Full license text is available in the LICENSE file at the repository root.
+#----------------------------------------------------------------------------
+# Entry point for the RISC-V Architectural Certification Test flow, mirroring
+# sim/rtl_sim/run/run. Everything is driven from here:
+#
+#   ./run --setup                 fetch the pinned suite + pull the ACT4 image
+#   ./run --gen                   generate ELFs for the default persona (Docker)
+#   ./run --gen -p light          ...for another persona
+#   ./run                         run every generated ELF on the DUT
+#   ./run Svbare_Smode            run one test by name (globs work too)
+#   ./run InterruptsS-00 S-00     ...or several
+#   ./run -p ultra -j 8           persona + parallelism
+#   ./run -f 'Zbb-*'              filter on ELF basename
+#   ./run --list-tests            what is available to run
+#   ./run --list-tests 'Sm_*'     ...narrowed
+#   ./run --list-personas
+#   ./run --shell                 interactive shell inside the ACT4 container
+#
+# Simulation happens natively; only ELF *generation* needs the container (the
+# udb gem ships Linux-only helpers). See ../README.md.
+#----------------------------------------------------------------------------
+
+set -euo pipefail
+
+ARCH_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() { sed -n '13,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+# Pull the persona out without disturbing the remaining args, so --gen and the
+# plain run form can share one command line.
+PERSONA="performance"
+ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -p|--persona) PERSONA="$2"; ARGS+=("$1" "$2"); shift 2 ;;
+        -h|--help)    usage; exit 0 ;;
+        *)            ARGS+=("$1"); shift ;;
+    esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+
+case "${1:-}" in
+    --setup)
+        "${ARCH_TEST_DIR}/bin/fetch_suite.sh"
+        exec "${ARCH_TEST_DIR}/bin/act_docker" --pull
+        ;;
+    --gen)
+        shift
+        # Drop the persona flag: it selects the config path, it is not a make arg.
+        MAKE_ARGS=()
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -p|--persona) shift 2 ;;
+                *)            MAKE_ARGS+=("$1"); shift ;;
+            esac
+        done
+        CFG="config/cores/arvern/arvern-${PERSONA}/test_config.yaml"
+        if [ ! -f "${ARCH_TEST_DIR}/src/arvern-${PERSONA}/test_config.yaml" ]; then
+            echo "ERROR: no DUT config for persona '${PERSONA}'" >&2
+            echo "       expected ${ARCH_TEST_DIR}/src/arvern-${PERSONA}/" >&2
+            exit 1
+        fi
+        # Per-config extension exclusions, on top of the common ones.
+        #
+        # su-nocntr: Zicsr-csrrs-00 and friends pick the CSR they exercise with
+        # #if F -> V -> !U_SUPPORTED -> ZICNTR -> #error. A config with U-mode but
+        # no F/V/Zicntr falls off the end of that chain and fails to COMPILE
+        # ("no CSR known for testing"). The configuration is legal; the test just
+        # cannot express it. Drop Zicsr there rather than lose the whole config.
+        EXCL="SdtrigSm,SdtrigS,SdtrigU"
+        case "${PERSONA}" in
+            su-nocntr) EXCL="${EXCL},Zicsr" ;;
+        esac
+        exec "${ARCH_TEST_DIR}/bin/act_docker" make elfs \
+             "CONFIG_FILES=${CFG}" FAST=True \
+             "EXCLUDE_EXTENSIONS=${EXCL}" \
+             ${MAKE_ARGS[@]+"${MAKE_ARGS[@]}"}
+        ;;
+    --shell)
+        exec "${ARCH_TEST_DIR}/bin/act_docker"
+        ;;
+    *)
+        exec "${ARCH_TEST_DIR}/bin/run_act" ${@+"$@"}
+        ;;
+esac

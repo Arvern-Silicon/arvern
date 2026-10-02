@@ -1,0 +1,146 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/riscv/riscv-unified-db/main/spec/schemas/config_schema.json
+
+# Copyright (c) 2026, 10xEngineers, Harvey Mudd College and Eclipse Foundation
+# SPDX-License-Identifier: Apache-2.0 WITH SHL-2.1
+
+# UDB Architecture Configuration for the aRVern "light" persona.
+# See rtl_sweep_configs.py:PERSONAS -- RV32E + Zmmul + Zca, M-mode only.
+#
+# The smallest viable core on the ladder. Relative to "classic":
+#   RV32E_EN=1    -> base is E, not I: 16 GPRs. misa[4]=1, misa[8]=0
+#                    (arv_csr_ids.v:153 / :147). This is what makes the suite
+#                    pick tests/rv32e/* instead of tests/rv32i/*.
+#   B_EXTENSION=0 -> no Zbb.
+#   ZICNTR_EN=0   -> no cycle/time/instret, no mcounteren, no mcountinhibit.
+#   SU_MODE_EN=0  -> M-mode ONLY. S-mode CSRs and mideleg/medeleg are RAZ/WI,
+#                    sret raises illegal-instruction, mstatus.MPP is forced to M,
+#                    misa[18] (S) and misa[20] (U) both read 0.
+#   MUL_TYPE=3    -> sixteen-cycle multiplier (architecturally invisible; it is
+#                    reported only in marv_cfg, a custom CSR the suite never reads).
+#
+# COVERAGE NOTE: every test under tests/priv/ lists 'I' in REQUIRED_EXTENSIONS,
+# so an E-base config selects NONE of them -- this persona runs the rv32e
+# instruction tests only, and the suite gives no privileged coverage of the
+# M-only (SU_MODE_EN=0) trap architecture at all. That is an upstream gap, not a
+# configuration mistake: there is no rv32e priv test directory. The M-only trap
+# behaviour is covered instead by sim/rtl_sim (the trap_* directed tests run
+# under -rtl_config light).
+---
+$schema: config_schema.json#
+kind: architecture configuration
+type: fully configured
+name: arvern-light
+description: aRVern "light" persona - RV32E + Zmmul + Zca, M-mode only
+# UDB has no E extension (see arch_overlay/ext/E.yaml for the full story), so it
+# is supplied here as an overlay. udb's merge_arch only accepts an ABSOLUTE path
+# or a folder name inside the gem's own custom/isa, so this is the container
+# mount point -- generation runs only inside bin/act_docker, which bind-mounts
+# sim/arch_test/src at /act4/config/cores/arvern. Same convention as the
+# "/opt/riscv/..." $schema path in sail.json.
+arch_overlay: /act4/config/cores/arvern/arvern-light/arch_overlay
+implemented_extensions:
+  - { name: E, version: "= 2.0" }
+  - { name: Zmmul, version: "= 1.0" }
+  - { name: C, version: "= 2.0" }
+  - { name: Zca, version: "= 1.0.0" }
+  - { name: Zicsr, version: "= 2.0" }
+  - { name: Zifencei, version: "= 2.0" }
+  - { name: Sm, version: "= 1.12.0" }
+
+params:
+  # XLEN parameters (VERIFIED)
+  MXLEN: 32
+  PHYS_ADDR_WIDTH: 32
+
+  # MISA (VERIFIED -- arv_csr_ids.v: misa is a pure `assign` from parameters,
+  # there is no write path, so every extension bit is read-only)
+  MUTABLE_MISA_C: false
+  MISA_CSR_IMPLEMENTED: true
+  # NB no TIME_CSR_IMPLEMENTED here: UDB gates that parameter on Zicntr, which
+  # this persona does not implement (ZICNTR_EN=0 -- arv_csr_cntr.v is not built,
+  # so the whole 0xC00 bank is absent). Declaring it is an error, not a
+  # redundancy.
+
+  # endianness (VERIFIED)
+  M_MODE_ENDIANNESS: little
+
+  # trap/exception behavior (VERIFIED)
+  TRAP_ON_ECALL_FROM_M: true
+  TRAP_ON_EBREAK: true
+  TRAP_ON_UNIMPLEMENTED_INSTRUCTION: true
+  TRAP_ON_RESERVED_INSTRUCTION: true
+  # VERIFIED -- non-existent CSRs inside an implemented bank read 0 / ignore
+  # writes rather than trapping (see CLAUDE.md "Spec Compliance Notes")
+  TRAP_ON_UNIMPLEMENTED_CSR: false
+  TRAP_ON_ILLEGAL_WLRL: false
+
+  # MTVAL reporting (VERIFIED against doc/traps_and_interrupts.md section 2,
+  # "mtval is sampled at trap entry":
+  #   causes 0/4/6 -> faulting misaligned address
+  #   causes 1/5/7 -> faulting access-fault address
+  #   cause  2     -> 0 (spec-legal; handlers re-fetch the encoding from mepc)
+  #   cause  3     -> 0
+  REPORT_VA_IN_MTVAL_ON_BREAKPOINT: false
+  REPORT_VA_IN_MTVAL_ON_LOAD_MISALIGNED: true
+  REPORT_VA_IN_MTVAL_ON_STORE_AMO_MISALIGNED: true
+  REPORT_VA_IN_MTVAL_ON_INSTRUCTION_MISALIGNED: true
+  REPORT_VA_IN_MTVAL_ON_LOAD_ACCESS_FAULT: true
+  REPORT_VA_IN_MTVAL_ON_STORE_AMO_ACCESS_FAULT: true
+  REPORT_VA_IN_MTVAL_ON_INSTRUCTION_ACCESS_FAULT: true
+  REPORT_ENCODING_IN_MTVAL_ON_ILLEGAL_INSTRUCTION: false
+  MTVAL_WIDTH: 32
+  # The three REPORT_VA_IN_MTVAL_ON_*_PAGE_FAULT parameters the S-mode personas
+  # set are gated on S in UDB and must be omitted here: with no S-mode there is
+  # no MMU and no page-fault cause to report.
+
+  # Misaligned load/store support (VERIFIED -- arv_load_store.v:265-270 raises
+  # load/store address-misaligned; the access is suppressed, never split)
+  MISALIGNED_LDST: false
+  # A misaligned access into a PMP-denied region reports the access fault
+  # (5/7), not the misalignment (4/6): the checker outranks the alignment
+  # check. Priv 3.1.15 leaves this to the implementation; the sail reference
+  # makes the same choice (upstream configs declare `low`).
+  MISALIGNED_LDST_EXCEPTION_PRIORITY: low
+
+  # CSR / implementation IDs (VERIFIED -- arv_csr_ids.v)
+  ARCH_ID_VALUE: 0x36 # marchid = 54, allocated to aRVern by RISC-V International
+  # mvendorid = 0x000008FB = (bank 17 << 7) | 0x7B  (JEDEC JEP106 bank 18)
+  VENDOR_ID_BANK: 0x11
+  VENDOR_ID_OFFSET: 0x7B
+  # mimpid is a pure version register: {major, minor, patch} in [31:8], [7:0]
+  # reserved zero (arv_csr_ids.v). RTL_VERSION = 24'h010000 -> v1.0.0. The build
+  # configuration is NOT here -- it lives in marv_cfg (0xFFF), a custom CSR the
+  # suite does not read. Same value for every persona; bump it when RTL_VERSION
+  # moves, or Sm_mcsr-00 fails.
+  IMP_ID_VALUE: 0x01000000
+
+  # MTVEC (VERIFIED -- arv_csr_traps.v:920 stores {1'b0, wdata[0]}, so MODE is
+  # WARL-narrowed to Direct/Vectored and a write of 2 or 3 lands as 0 or 1)
+  MTVEC_MODES: [0, 1]
+  MTVEC_ACCESS: rw
+  MTVEC_ILLEGAL_WRITE_BEHAVIOR: custom
+  MTVEC_BASE_ALIGNMENT_VECTORED: 4
+  MTVEC_BASE_ALIGNMENT_DIRECT: 4
+
+  # Sm params (VERIFIED)
+  PRECISE_SYNCHRONOUS_EXCEPTIONS: true # in-order pipeline, no imprecise exception path
+  MARCHID_IMPLEMENTED: true # arv_csr_ids.v:85 -- fixed 0x36
+  MIMPID_IMPLEMENTED: true # arv_csr_ids.v -- non-zero, carries the RTL version
+  PMA_GRANULARITY: 2 # no PMA hardware; 32-bit AHB data bus => 4-byte natural granule
+
+  # CONFIG PTR (VERIFIED)
+  CONFIG_PTR_ADDRESS: 0x0 # arv_csr_ids.v:91 -- mconfigptr tied 0
+
+  # Counters (VERIFIED). ZICNTR_EN=0 and ZIHPM_NR=0, so arv_csr_cntr.v and
+  # arv_csr_hpm.v are both absent: there is no mcycle/minstret/mhpmcounter*, and
+  # mcounteren / mcountinhibit have no flops (RAZ/WI in their banks).
+  HPM_COUNTER_EN: [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+  # COUNTINHIBIT_EN is gated on MCOUNTINHIBIT_IMPLEMENTED and so must be omitted.
+  MCOUNTINHIBIT_IMPLEMENTED: false
+  NUM_PMP_ENTRIES: 0
+  # No U-mode and no counters, so mcounteren gates nothing at all.
+  MCOUNTENABLE_EN: [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+
+  # MSTATUS_FS_LEGAL_VALUES / MSTATUS_VS_LEGAL_VALUES are gated on (F or S) and
+  # (Zvl32b or S) respectively. With none of those present the fields are
+  # unconditionally read-only zero and the parameters must be omitted.

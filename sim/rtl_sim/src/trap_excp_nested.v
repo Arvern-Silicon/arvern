@@ -9,15 +9,19 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Full license text is available in the LICENSE file at the repository root.
 //----------------------------------------------------------------------------
-// Description: NESTED EXCEPTIONS
+// Description: NESTED EXCEPTIONS (Ssdbltrp double-trap delivery)
 //   Nested exception verification:
 //   - Normal delegation: U-mode ECALL delegated to S-mode via MEDELEG
-//   - Nested exception in S-mode exception handler -> M-mode
-//   (in_s_excp_trap blocks re-delegation while sepc/scause are live)
+//   - Nested exception in S-mode exception handler -> M-mode as an Ssdbltrp
+//   DOUBLE TRAP (sstatus.SDT set on S trap entry, menvcfgh.DTE=1 reset
+//   default): MCAUSE=16, MTVAL2 (0x34B) = original cause (2).
 //   - Delegation still works normally after nested trap clears
 //
+//   This test locks the Ssdbltrp double-trap delivery contract (mcause=16,
+//   mtval2=original cause) for the exception-inside-exception case.
+//
 //   Nested exception inside an S-mode IRQ handler is covered by
-//   trap_s_nested_excp.{s,v} (delegation is permitted there).
+//   trap_s_nested_excp.{s,v} (handler clears SDT; delegation permitted).
 //----------------------------------------------------------------------------
 
 `define LONG_TIMEOUT
@@ -28,7 +32,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -94,12 +98,13 @@ initial
 
 
       //=================================================================
-      // PHASE 3: Nested exception (illegal inst in S-mode handler -> M-mode)
+      // PHASE 3: Nested exception (illegal inst in S-mode handler
+      //          -> M-mode Ssdbltrp double trap)
       //=================================================================
       $display("");
       $display("");
       $display(" ====================================================================");
-      $display("|   PHASE 3: NESTED EXCEPTION (S-mode handler -> M-mode, MCAUSE=2)  |");
+      $display("|   PHASE 3: NESTED EXCEPTION (S handler -> M double trap, CAUSE=16) |");
       $display(" ====================================================================");
       $display("");
       $display("Waiting for the firmware...");
@@ -108,8 +113,12 @@ initial
       repeat(3) @(posedge free_clk);
 
       $display("");
-      $display("--- MCAUSE verification (illegal instruction in S-mode handler) ---");
-      check_mem_value(`SPAD(32'h40), 32'h00000002);
+      $display("--- MCAUSE verification (Ssdbltrp double trap, cause 16) ---");
+      check_mem_value(`SPAD(32'h40), 32'h00000010);
+
+      $display("");
+      $display("--- MTVAL2 verification (original cause = 2, illegal instruction) ---");
+      check_mem_value(`SPAD(32'h4C), 32'h00000002);
 
       $display("");
       $display("--- MSTATUS.MPP verification (expect 01 = S-mode, not U-mode) ---");

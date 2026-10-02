@@ -35,8 +35,40 @@
 #   Phase 3 (cm.jalt N=32): trap_count, MCAUSE, MEPC captured
 #=========================================================================
 
+.equ MNSTATUS,       0x744
+.equ MNCAUSE,        0x742
+
 main:
     j _start
+
+    #=================================================================
+    # RNMI HANDLER -- the JVT load access fault is reported here now.
+    #=================================================================
+    .align 2
+nmi_handler:
+    li   s1, 0x80000000
+    lw   t0, 0x24(s1)
+    addi t0, t0, 1
+    sw   t0, 0x24(s1)
+    csrr t0, MNCAUSE
+    sw   t0, 0x28(s1)
+    csrr t0, 0x741              # mnepc -- where does mnret resume?
+    sw   t0, 0x2C(s1)
+    csrr t0, 0x7FE              # marv_estat
+    sw   t0, 0x30(s1)
+    csrr t0, 0xFFC              # marv_epc -- WHAT faulted
+    sw   t0, 0x34(s1)
+    li   t0, 0x5
+    csrw 0x7FE, t0              # W1C valid|overrun so the next phase reads its own
+
+    # mnepc points AT the cm.jt, and a JT table read is NOT restartable: a plain
+    # mnret would re-execute it into the same hard bus error forever. A real
+    # handler must decide where to go. This one skips to the recovery address --
+    # the documented opt-in idiom, just in the other direction.
+    lw   t0, 0x0C(s1)
+    csrw 0x741, t0              # mnepc = recovery
+    lw   zero, 0x28(s1)
+    .word 0x70200073            # mnret
 
     .align 2
 trap_handler:
@@ -83,11 +115,25 @@ trap_handler:
     sw   t0, 0x08(s1)
     sw   t0, 0x0C(s1)
 
-    # Install handler
+    # Install handler -- NEGATIVE CONTROL, must never be entered
     la   t0, trap_handler
     csrw mtvec, t0
 
-    li   x31, 0x11111111
+    la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
+    sw   t0, 0x20(s1)
+    sw   zero, 0x24(s1)
+    sw   zero, 0x28(s1)
+    lw   zero, 0x20(s1)
+
+    li   x31, 0x11111111        # tb now programs nmi_vector
+
+    li   t0, 20
+wait_vec:
+    addi t0, t0, -1
+    bnez t0, wait_vec
+
+    csrsi MNSTATUS, 8           # mnstatus.NMIE = 1 -- REQUIRED for delivery
 
 
     #=================================================================
@@ -104,11 +150,15 @@ trap_handler:
     la   t0, phase3_start
     sw   t0, 0x0C(s1)
 
+    la   t0, jt_pc
+    sw   t0, 0x38(s1)           # publish the cm.jt PC for the testbench
+    lw   zero, 0x38(s1)
+
     li   x31, 0x12121212        # marker: about to enter cm.jt
+jt_pc:
     cm.jt 0                     # JVT[0] -> load from 0x00000000 -> fault
-    # Pre-fix: livelock here. Post-fix: trap handler runs and mret jumps
-    # to phase3_start. The instruction below should not execute.
-    li   x31, 0xBADBADBA        # If we ever see this, recovery failed.
+    # The RNMI aborts the table jump; mnret resumes at the resume point,
+    # so control falls through here rather than taking the poisoned target.
 
 phase3_start:
     li   x31, 0x22222222
@@ -123,9 +173,13 @@ phase3_start:
     la   t0, phase4_start
     sw   t0, 0x0C(s1)
 
+    la   t0, jalt_pc
+    sw   t0, 0x38(s1)           # publish the cm.jalt PC
+    lw   zero, 0x38(s1)
+
     li   x31, 0x32323232
+jalt_pc:
     cm.jalt 32                  # JVT[32] at address 128 -> load fault
-    li   x31, 0xBADBADBA
 
 phase4_start:
     li   x31, 0xdeadbeef

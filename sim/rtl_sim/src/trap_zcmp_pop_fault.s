@@ -13,7 +13,7 @@
 #   Reproducer for the CM.POP/POPRET sync-exception UOP-abort gap:
 #
 #   ex_uop_kill_i = trap_kill_uop_o = ((irqkill_uop_en & trap_is_irq) |
-#   trap_is_nmi) & trap_pending_o & ...
+#   trap_is_nmi) & trap_pending & ...
 #   never fires for synchronous LSU access faults (trap_is_irq=0,
 #   trap_is_nmi=0). Therefore ex_uop_control_reg keeps the CM.POP active
 #   after a load-access fault, the sequencer keeps decrementing the
@@ -26,8 +26,9 @@
 #   fault.
 #   2. Pre-init s0/s1/s2 with sentinel values 0xA0/A1/A2A2A2A2.
 #   3. cm.pop {ra, s0-s2}, 16.
-#   4. Trap handler counts each trap entry, captures MEPC/MCAUSE/MTVAL,
-#   and redirects MEPC to recovery.
+#   4. The load access fault is now an RNMI (mncause=0x80000003), NOT mcause=5.
+#      The mtvec handler stays installed as a NEGATIVE CONTROL: it must never
+#      be entered. Recovery is mnret to the resume point.
 #   5. After recovery:
 #   - trap_count must be exactly 1 (post-fix)
 #   - s0/s1/s2 must retain their pre-pop sentinel values (post-fix)
@@ -44,13 +45,16 @@
 # Scratchpad layout (SRAM base 0x80000000)
 #
 #   0x00: trap_count             (incremented on each handler entry)
-#   0x04: last MCAUSE
+#   0x04: last MCAUSE (must stay 0 -- mtvec is a negative control)
 #   0x08: last MEPC
 #   0x0C: recovery address       (set before cm.pop)
 #   0x10: s0 captured after recovery
 #   0x14: s1 captured after recovery
 #   0x18: s2 captured after recovery
 #=========================================================================
+
+.equ MNSTATUS,       0x744
+.equ MNCAUSE,        0x742
 
 main:
     j _start
@@ -63,6 +67,22 @@ main:
     #   csrrw sp, mscratch, sp   -- atomic swap: sp <- mscratch, mscratch <- old sp
     # On return we swap back.
     #=================================================================
+    #=================================================================
+    # RNMI HANDLER -- where the bus error is now reported.
+    # Deliberately touches no stack: sp is 0 (unmapped) at fault time,
+    # and s1 is re-established from a literal.
+    #=================================================================
+    .align 2
+nmi_handler:
+    li    s1, 0x80000000
+    lw    t0, 0x24(s1)
+    addi  t0, t0, 1
+    sw    t0, 0x24(s1)
+    csrr  t0, MNCAUSE
+    sw    t0, 0x28(s1)
+    lw    zero, 0x28(s1)
+    .word 0x70200073             # mnret
+
     .align 2
 trap_handler:
     csrrw sp, mscratch, sp       # swap SP with trap-handler stack
@@ -114,16 +134,33 @@ _start:
     sw   t0, 0x10(s1)
     sw   t0, 0x14(s1)
     sw   t0, 0x18(s1)
+    sw   t0, 0x24(s1)
+    sw   t0, 0x28(s1)
 
-    # Install trap handler
+    # Install trap handler -- NEGATIVE CONTROL, must never be entered
     la   t0, trap_handler
     csrw mtvec, t0
+
+    # Publish the RNMI handler address for the testbench to program
+    la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
+    sw   t0, 0x20(s1)
+    lw   zero, 0x20(s1)
 
     # Pre-init sentinel-bearing registers
     li   s0, 0xA0A0A0A0           # x8
     li   s2, 0xA2A2A2A2           # x18
 
-    li   x31, 0x11111111          # init done
+    li   x31, 0x11111111          # init done; tb now programs nmi_vector
+
+    li   t0, 20                   # let the testbench apply it
+wait_vec:
+    addi t0, t0, -1
+    bnez t0, wait_vec
+
+    csrsi MNSTATUS, 8             # mnstatus.NMIE = 1 -- REQUIRED for delivery
+
+    li   x31, 0x22222222          # NMIE armed
 
 
     #=================================================================
@@ -162,9 +199,8 @@ _start:
 
     li   x31, 0x12121212          # marker: about to enter cm.pop
     cm.pop {ra, s0-s2}, 16        # rlist=7 -> pops s2, s1, s0, ra in order
-    # Pre-fix: control may or may not reach here depending on how the
-    # sequencer continues. Post-fix: recovery is via trap handler mret.
-    li   x31, 0xBADBAD01
+    # The RNMI aborts the sequence; mnret resumes HERE (the resume point),
+    # so control reaches the next instruction normally.
 
 recovery_p2:
     # Restore working SP for downstream code
@@ -175,7 +211,7 @@ recovery_p2:
     sw   s2, 0x18(s1)             # expect 0xA2A2A2A2 (post-fix)
     # Skip s1 -- s1 holds the scratchpad base and we need it.
 
-    li   x31, 0x22222222          # phase 2 done
+    li   x31, 0x33333333          # phase 2 done
 
 
     li   x31, 0xdeadbeef

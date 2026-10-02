@@ -196,6 +196,10 @@ handler_done:
 
     # Enable MSTATUS.MIE (bit 3)
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrsi 0x744, 8            # Smdbltrp: a trap in M-mode with NMIE=0 is an unexpected trap
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Initialize callee-saved registers to known pattern
@@ -252,25 +256,15 @@ load_misaligned_unmapped:
 
 
     #=================================================================
-    # PHASE 4: Load aligned to unmapped address (MCAUSE=5)
-    #          Address 0x10000000 is unmapped but aligned.
-    #          No misalignment, so access fault fires in WB.
+    # PHASE REMOVED: aligned load/store to an unmapped address.
+    #
+    # That is a bus error now -- an RNMI with mncause=0x80000003, not a
+    # synchronous mcause=5/7 -- so it no longer participates in this
+    # priority ordering at all. The MISALIGNED-to-unmapped phases are the
+    # ones that still matter, and they still assert 4-not-5 / 6-not-7:
+    # misalignment is detected before any bus access is issued, so it must
+    # still win. mcause 5/7 are RESERVED.
     #=================================================================
-
-    li   t0, 0x10000000       # aligned unmapped address
-
-load_fault_aligned:
-    lw   t1, 0(t0)            # load from unmapped address -> access fault
-
-    # Handler advances MEPC by 4, returns here
-    lw   t0, 0x04(s1)
-    sw   t0, 0x40(s1)         # MCAUSE
-    lw   t0, 0x08(s1)
-    sw   t0, 0x44(s1)         # MTVAL
-    lw   t1, 0x44(s1)         # load-back
-
-    li   x31, 0x44444444
-
 
     #=================================================================
     # PHASE 5: Store misaligned to valid address (MCAUSE=6)
@@ -317,26 +311,15 @@ store_misaligned_unmapped:
 
 
     #=================================================================
-    # PHASE 7: Store aligned to unmapped address (MCAUSE=7)
-    #          Address 0x00000000 is unmapped but aligned.
-    #          No misalignment, so access fault fires in WB.
+    # PHASE REMOVED: aligned load/store to an unmapped address.
+    #
+    # That is a bus error now -- an RNMI with mncause=0x80000003, not a
+    # synchronous mcause=5/7 -- so it no longer participates in this
+    # priority ordering at all. The MISALIGNED-to-unmapped phases are the
+    # ones that still matter, and they still assert 4-not-5 / 6-not-7:
+    # misalignment is detected before any bus access is issued, so it must
+    # still win. mcause 5/7 are RESERVED.
     #=================================================================
-
-    li   t0, 0               # aligned unmapped address (address 0)
-    li   t2, 0xCAFECAFE       # data to store
-
-store_fault_aligned:
-    sw   t2, 0(t0)            # store to unmapped address -> access fault
-
-    # Handler advances MEPC by 4, returns here
-    lw   t0, 0x04(s1)
-    sw   t0, 0x70(s1)         # MCAUSE
-    lw   t0, 0x08(s1)
-    sw   t0, 0x74(s1)         # MTVAL
-    lw   t1, 0x74(s1)         # load-back
-
-    li   x31, 0x77777777
-
 
     #=================================================================
     # PHASE 8: Illegal instruction (MCAUSE=2, MTVAL=0)

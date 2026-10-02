@@ -19,6 +19,8 @@
 #   IRQ signals driven by testbench (block-level verification).
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -165,6 +167,11 @@ handler_done:
     sw   t0, 0x18(s1)
     lw   t1, 0x18(s1)
 
+    # Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+    # resets to 0, so boot code must set mnstatus.NMIE=1 before any
+    # ordinary interrupt can be delivered. Smrnmi is unconditional.
+    csrsi 0x744, 8              # mnstatus.NMIE = 1
+
     # Initialize callee-saved registers
     li   s2, 0xAAAAAAAA
     li   s3, 0xBBBBBBBB
@@ -183,6 +190,9 @@ handler_done:
     li   t0, 0x80
     csrs mie, t0
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Store expected MEPC (= address of instruction after WFI)

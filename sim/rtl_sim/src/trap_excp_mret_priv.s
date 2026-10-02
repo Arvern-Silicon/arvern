@@ -36,6 +36,8 @@
 #   u_ran_marker != 0, s_ran_marker != 0.
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -172,6 +174,7 @@ m_handler_done:
     #=================================================================
 _start:
     li   sp, 0x8000F000          # safe SP inside 64KB SRAM
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000          # scratchpad base
 
     # Zero scratchpad
@@ -255,6 +258,9 @@ u_mode_p2:
     li   t0, 0x1800
     csrc mstatus, t0
     li   t0, 0x0800
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
     # Clear MPIE
     li   t0, 0x80

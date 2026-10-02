@@ -27,7 +27,7 @@ integer allow_peripheral_accesses;
 
 reg [31:0] alu_count;
 
-`define SPAD(byte_off) (byte_off/4)
+`define SPAD(byte_off) ((byte_off)/4)
 
 initial
    begin

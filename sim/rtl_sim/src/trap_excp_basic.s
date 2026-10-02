@@ -15,8 +15,6 @@
 #   - Illegal instruction (MCAUSE = 2)
 #   - Load address misaligned (MCAUSE = 4)
 #   - Store address misaligned (MCAUSE = 6)
-#   - Load access fault (MCAUSE = 5)
-#   - Store access fault (MCAUSE = 7)
 #   - MEPC, MSTATUS save/restore for each
 #   - Register preservation across exceptions
 #----------------------------------------------------------------------------
@@ -197,6 +195,10 @@ handler_done:
 
     # Enable MSTATUS.MIE
     li   t0, 0x8
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrsi 0x744, 8            # Smdbltrp: a trap in M-mode with NMIE=0 is an unexpected trap
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     # Initialize callee-saved registers
@@ -275,48 +277,23 @@ store_misaligned:
 
 
     #=================================================================
-    # PHASE 5: Load access fault (MCAUSE = 5)
+    # PHASES 5 and 6 (load / store access fault, MCAUSE 5 / 7) REMOVED in v0.1.
+    # Data-bus errors are now reported asynchronously as an RNMI (mncause=3);
+    # mcause 5/7 are RESERVED and cannot be raised here.
+    # That behaviour is covered by trap_nmi_bus_error.
+    #
+    # The sync points are kept so the .v phase numbering stays aligned.
     #=================================================================
-
-    la   t0, load_fault
-    sw   t0, 0x58(s1)         # expected MEPC
-
-    li   t2, 0               # unmapped address
-
-load_fault:
-    lw   t0, 0(t2)            # load from unmapped address -> access fault
-
-    # Handler advances MEPC, returns here
-    lw   t0, 0x04(s1)
-    sw   t0, 0x50(s1)         # MCAUSE
-    lw   t0, 0x08(s1)
-    sw   t0, 0x54(s1)         # MEPC
-    lw   t1, 0x54(s1)         # load-back
-
     li   x31, 0x55555555
-
-
-    #=================================================================
-    # PHASE 6: Store access fault (MCAUSE = 7)
-    #=================================================================
-
-    la   t0, store_fault
-    sw   t0, 0x68(s1)         # expected MEPC
-
-    li   t2, 0               # unmapped address
-    li   t3, 0xDEADDEAD      # data to store
-
-store_fault:
-    sw   t3, 0(t2)            # store to unmapped address -> access fault
-
-    # Handler advances MEPC, returns here
-    lw   t0, 0x04(s1)
-    sw   t0, 0x60(s1)         # MCAUSE
-    lw   t0, 0x08(s1)
-    sw   t0, 0x64(s1)         # MEPC
-    lw   t1, 0x64(s1)         # load-back
-
+    li   t0, 30                   # hold each retired sync value long enough
+hold_p5:                          # for the testbench to observe it
+    addi t0, t0, -1
+    bnez t0, hold_p5
     li   x31, 0x66666666
+    li   t0, 30
+hold_p6:
+    addi t0, t0, -1
+    bnez t0, hold_p6
 
 
     #=================================================================

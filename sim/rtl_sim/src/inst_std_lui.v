@@ -23,6 +23,20 @@ initial
       @(posedge free_clk);
       @(posedge hresetn);
 
+      // Sample the register file's reset state HERE, before the core can retire an
+      // instruction that writes one: the startup code's `jal t0, _random_irq_init`
+      // writes x5 within a couple of cycles, and exactly when it lands relative to a
+      // clock-counted delay is simulator-dependent.
+      $display(" ====================================================================");
+      $display("|                  CHECK DEFAULT REGISTER VALUES                     |");
+      $display(" ====================================================================");
+      `ifndef RANDOM_IRQ
+      for (ii = 0; ii < 32; ii = ii + 1) begin
+         check_cpu_reg(ii, 32'h00000000);
+      end
+      `endif
+      $display("");
+
       // Reset the peripherals
       @(negedge free_clk);
       force   ahb_bus_system_inst.ahb_periph_example_inst0.hresetn_i = 1'b0;
@@ -31,17 +45,6 @@ initial
       release ahb_bus_system_inst.ahb_periph_example_inst0.hresetn_i;
       release ahb_bus_system_inst.ahb_periph_example_inst1.hresetn_i;
 
-      $display(" ====================================================================");
-      $display("|                  CHECK DEFAULT REGISTER VALUES                     |");
-      $display(" ====================================================================");
-      repeat(3) @(posedge free_clk);
-      $display("");
-
-      `ifndef RANDOM_IRQ
-      for (ii = 0; ii < 32; ii = ii + 1) begin
-         check_cpu_reg(ii, 32'h00000000);
-      end
-      `endif
 
       $display("");
       $display("");

@@ -90,9 +90,9 @@ initial
       dhry_mips_per_mhz = dhry_mips / mclk_frequency;
 
       // Report results
-      $display("\INFO-VERILOG: Dhrystone per second : %f",   dhry_per_sec);
-      $display("\INFO-VERILOG: DMIPS                : %f",   dhry_mips);
-      $display("\INFO-VERILOG: DMIPS/MHz            : %f\n", dhry_mips_per_mhz);
+      $display("\nINFO-VERILOG: Dhrystone per second : %f",   dhry_per_sec);
+      $display("\nINFO-VERILOG: DMIPS                : %f",   dhry_mips);
+      $display("\nINFO-VERILOG: DMIPS/MHz            : %f\n", dhry_mips_per_mhz);
 
       //---------------------------------------
       // Wait for the end of C-code execution

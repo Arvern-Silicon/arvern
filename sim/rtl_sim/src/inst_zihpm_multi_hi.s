@@ -16,13 +16,13 @@
 #   Each counter's high word is written with a distinct pattern:
 #   mhpmcounterh(3+i) = 0xA0000000 | (3+i)
 #
-#   ZIHPM_NR is discovered at runtime from mimpid[23:20].
+#   ZIHPM_NR is discovered at runtime from marv_cfg[15:12].
 #
 #   Requires: ZIHPM_NR >= 1
 #   no_random_irq: true
 #
 #   Scratchpad layout (base 0x80000000):
-#   0x00: mimpid readback (bits[23:20] = ZIHPM_NR)
+#   0x00: marv_cfg readback (bits[15:12] = ZIHPM_NR)
 #   Per counter i (i=0 → counter3, i=7 → counter10):
 #   0x04 + i*4: hi_readback_i — mhpmcounterh(3+i) readback
 #   (expect 0xA0000000|(3+i) if implemented)
@@ -46,7 +46,7 @@ main:
     li   s1, 0x80000000              # s1 = scratchpad base
     li   s2, 0x80000004              # s2 = first counter result word
 
-    # Zero 9 words of scratchpad (mimpid + 8 counter hi results)
+    # Zero 9 words of scratchpad (marv_cfg + 8 counter hi results)
     li   t0, 9
     li   t2, 0x80000000
 zero_loop:
@@ -59,14 +59,14 @@ zero_loop:
     li   t0, INH_ALL_HPM
     csrrs x0, MCOUNTINHIBIT, t0
 
-    # Read mimpid; extract ZIHPM_NR from bits[23:20]
-    csrr t0, MIMPID
-    sw   t0, 0x00(s1)                # mimpid readback
+    # Read marv_cfg (0xFFF); ZIHPM_NR is at bits[15:12]
+    csrr t0,  0xFFF
+    sw   t0, 0x00(s1)                # marv_cfg readback
     lw   t3, 0x00(s1)                # AHB fence
-    srli s3, t0, 20
+    srli s3, t0, 12
     andi s3, s3, 0xF                 # s3 = ZIHPM_NR (0-8)
 
-    li   x31, 0x11111111             # Sync: mimpid written
+    li   x31, 0x11111111             # Sync: marv_cfg written
     beqz s3, skip_to_done            # ZIHPM_NR=0: nothing to test
 
 

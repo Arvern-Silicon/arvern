@@ -1,0 +1,121 @@
+#!/bin/bash
+#----------------------------------------------------------------------------
+# view_cov -- list the coverage databases under run/cov/ and open one.
+#
+#   ./view_cov            list them and ask which to open
+#   ./view_cov <name>     open one directly ("regression", or a test name)
+#   ./view_cov -l         list only, no prompt
+#   ./view_cov -r <name>  force the HTML to be regenerated first
+#
+# Databases come from `run_all -cov` (the whole regression) and `run <test> -cov`
+# (one test each). The HTML is regenerated automatically when it is missing or
+# older than the .dat files it was built from.
+#----------------------------------------------------------------------------
+set -u
+
+RUN_DIR="$(cd "$(dirname "$0")" && pwd)"
+COV="$RUN_DIR/cov"
+BIN="$RUN_DIR/../bin"
+
+LIST_ONLY=0
+FORCE=0
+WANT=""
+for a in "$@"; do
+    case "$a" in
+        -l|--list)  LIST_ONLY=1 ;;
+        -r|--regen) FORCE=1 ;;
+        -*)         echo "usage: view_cov [-l] [-r] [<name>]"; exit 1 ;;
+        *)          WANT="$a" ;;
+    esac
+done
+
+# -- collect databases: the sweep, then each single-test run -----------------------
+names=(); paths=()
+if [ -d "$COV/dats" ] && [ -n "$(ls -A "$COV/dats" 2>/dev/null)" ]; then
+    names+=("regression"); paths+=("$COV")
+fi
+for d in "$COV"/runs/*/; do
+    [ -d "$d/dats" ] || continue
+    [ -n "$(ls -A "$d/dats" 2>/dev/null)" ] || continue
+    names+=("$(basename "${d%/}")"); paths+=("${d%/}")
+done
+for d in "$COV"/single/*/; do
+    [ -d "$d/dats" ] || continue
+    [ -n "$(ls -A "$d/dats" 2>/dev/null)" ] || continue
+    names+=("single:$(basename "${d%/}")"); paths+=("${d%/}")
+done
+
+if [ ${#names[@]} -eq 0 ]; then
+    echo "No coverage databases under $COV"
+    echo "Generate one with:   ./run_all -cov        (whole regression)"
+    echo "               or:   ./run <test> -cov     (a single test)"
+    exit 1
+fi
+
+# -- summarise: totals come from the generated HTML, so listing stays instant ------
+summary () {   # $1 = database dir
+    python3 - "$1" <<'PY' 2>/dev/null || echo "not generated yet"
+import sys, os, re, json
+d = sys.argv[1]
+h = os.path.join(d, 'coverage.html')
+if not os.path.exists(h):
+    print("not generated yet"); raise SystemExit
+m = re.search(r'TOTALS = (\{.*?\});', open(h, encoding='utf-8').read(), re.S)
+if not m:
+    print("unreadable"); raise SystemExit
+t = json.loads(m.group(1))['acc']
+print(" / ".join("%5.1f%%" % (100.0 * t[k][0] / t[k][1] if t[k][1] else 0.0)
+                 for k in ('v_line', 'v_branch', 'v_toggle')))
+PY
+}
+
+echo
+printf '  %-3s %-26s %6s  %-26s %s\n' "#" "database" "tests" "line / branch / toggle" "generated"
+printf '  %s\n' "--------------------------------------------------------------------------------"
+for i in "${!names[@]}"; do
+    n=$(ls "${paths[$i]}/dats" 2>/dev/null | wc -l | tr -d ' ')
+    when=$( [ -f "${paths[$i]}/coverage.html" ] \
+            && date -r "${paths[$i]}/coverage.html" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "-" )
+    printf '  %-3s %-26s %6s  %-26s %s\n' "$((i+1))" "${names[$i]}" "$n" "$(summary "${paths[$i]}")" "$when"
+done
+echo
+
+[ $LIST_ONLY -eq 1 ] && exit 0
+
+# -- pick one ----------------------------------------------------------------------
+sel=-1
+if [ -n "$WANT" ]; then
+    for i in "${!names[@]}"; do [ "${names[$i]}" = "$WANT" ] && sel=$i; done
+    if [ $sel -lt 0 ]; then echo "No database named '$WANT'"; exit 1; fi
+elif [ ${#names[@]} -eq 1 ]; then
+    sel=0
+else
+    printf 'Which one? [1-%d] ' "${#names[@]}"
+    read -r ans
+    case "$ans" in
+        ''|*[!0-9]*) echo "aborted"; exit 0 ;;
+    esac
+    if [ "$ans" -lt 1 ] || [ "$ans" -gt ${#names[@]} ]; then echo "out of range"; exit 1; fi
+    sel=$((ans-1))
+fi
+
+DB="${paths[$sel]}"
+HTML="$DB/coverage.html"
+
+# Regenerate when asked, when missing, or when a .dat is newer than the report.
+need=$FORCE
+[ -f "$HTML" ] || need=1
+if [ "$need" -eq 0 ]; then
+    newest=$(ls -t "$DB/dats"/*.dat 2>/dev/null | head -1)
+    [ -n "$newest" ] && [ "$newest" -nt "$HTML" ] && need=1
+fi
+if [ "$need" -ne 0 ]; then
+    echo "Generating report for '${names[$sel]}' ..."
+    python3 "$BIN/cov_html.py" "$DB/dats" -o "$HTML" || exit 1
+fi
+
+echo "Opening $HTML"
+if   command -v open     >/dev/null 2>&1; then open "$HTML"
+elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$HTML"
+else echo "  (no opener found -- point a browser at the path above)"
+fi

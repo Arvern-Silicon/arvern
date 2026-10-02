@@ -16,7 +16,7 @@
 #   Phase 3 — mcountinhibit bit[N] freezes mhpmcounterN
 #   Phase 4 — hpmcounterN (shadow) == mhpmcounterN when inhibited
 #
-#   ZIHPM_NR is discovered at runtime from mimpid[23:20].  The test loops
+#   ZIHPM_NR is discovered at runtime from marv_cfg[15:12].  The test loops
 #   over counters 3..2+ZIHPM_NR; if ZIHPM_NR==0 the body is skipped.
 #
 #   Saved registers used (safe across random IRQs):
@@ -25,7 +25,7 @@
 #   s3 = ZIHPM_NR (0-8)
 #
 #   Scratchpad layout (base 0x80000000):
-#   0x00: mimpid readback  — bits[23:20] = ZIHPM_NR
+#   0x00: marv_cfg readback  — bits[15:12] = ZIHPM_NR
 #   Per counter i (i=0 => counter3, i=7 => counter10):
 #   base = 0x04 + i*0x18
 #   +0x00: phase1_event_rb    — mhpmevent(3+i) readback
@@ -115,7 +115,7 @@ main:
     li   s1, 0x80000000              # s1 = scratchpad base
     li   s2, 0x80000000              # s2 = zero-fill pointer
 
-    # Zero 52 words of scratchpad (4 bytes mimpid + 8 counters × 24 bytes)
+    # Zero 52 words of scratchpad (4 bytes marv_cfg + 8 counters × 24 bytes)
     li   t0, 0
     li   t2, 52
 zero_loop:
@@ -126,14 +126,14 @@ zero_loop:
 
     li   s2, 0x80000004              # s2 = start of counter data blocks
 
-    # Read mimpid; extract ZIHPM_NR from bits[23:20] into s3
-    csrr t0, MIMPID
-    sw   t0, 0x00(s1)                # mimpid readback at scratchpad[0]
+    # Read marv_cfg (0xFFF); ZIHPM_NR is at bits[15:12]
+    csrr t0,  0xFFF
+    sw   t0, 0x00(s1)                # marv_cfg readback at scratchpad[0]
     lw   t3, 0x00(s1)                # AHB fence
-    srli s3, t0, 20
+    srli s3, t0, 12
     andi s3, s3, 0xF                 # s3 = ZIHPM_NR (0-8)
 
-    li   x31, 0x11111111             # Sync: mimpid written to scratchpad
+    li   x31, 0x11111111             # Sync: marv_cfg written to scratchpad
     beqz s3, skip_to_done            # no HPM counters — skip test body
 
 

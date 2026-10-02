@@ -27,7 +27,7 @@ integer allow_peripheral_accesses;
 
 // Scratchpad word address offset (byte address / 4)
 // SRAM base is 0x80000000, word-addressed starting at 0
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -314,9 +314,14 @@ initial
       $display("");
       $display("Waiting for the firmware...");
 
-      @(probes_cpu.x31==32'h66666666);
+      // Level-sensitive: at SU_MODE_EN=0 the firmware skips the phase body and
+      // reaches this sync in a couple of instructions, so an edge wait misses it.
+      wait(probes_cpu.x31==32'h66666666);
       repeat(3) @(posedge free_clk);
 
+      // mcounteren exists only alongside U-mode: the firmware skips this phase
+      // when SU_MODE_EN=0, so there is nothing to check.
+      if (SU_MODE_EN != 0)
       begin : check_phase6_mcounteren
          reg [31:0] mcounteren_7;
          reg [31:0] mcounteren_0;
@@ -393,6 +398,7 @@ initial
       random_irq_enable = 0;       // Disable random IRQs before final checks
       repeat(3) @(posedge free_clk);
 
+      if (SU_MODE_EN != 0)
       begin : check_phase8_mcounteren_warl
          reg [31:0] cen_rb;
          cen_rb = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h40)];

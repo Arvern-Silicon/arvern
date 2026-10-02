@@ -28,7 +28,7 @@ integer allow_peripheral_accesses;
 
 // Scratchpad word address offset (byte address / 4)
 // SRAM base is 0x80000000, word-addressed starting at 0
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -148,12 +148,12 @@ initial
       $display("");
       $display("--- Trap count verification (CSR enable race) ---");
       begin : check_csr_race
-         reg [31:0] before, after;
-         before = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h30)];
+         reg [31:0] prev_cnt, after;
+         prev_cnt = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h30)];
          after  = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h34)];
-         if (after !== before + 1) begin
+         if (after !== prev_cnt + 1) begin
             $display("ERROR: Trap count should have incremented by 1 -- before: %0d, after: %0d %t ns",
-                     before, after, $time);
+                     prev_cnt, after, $time);
             error = error + 1;
          end else begin
             $display("PASS:  Trap count incremented by 1 (CSR enable race worked) %t ns", $time);

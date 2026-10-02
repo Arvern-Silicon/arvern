@@ -1,0 +1,84 @@
+Subject: [PATCH] tests/env: keep mscratch valid across RVTEST_GOTO_LOWER_MODE
+
+RVTEST_GOTO_LOWER_MODE swaps the caller's T3 into mscratch to obtain the
+M-mode save-area pointer, and only restores it four instructions later:
+
+    csrrw  T3, CSR_MSCRATCH, T3    # T3 = save ptr, mscratch = orig T3
+    SREG   T1, ...(T3)
+    SREG   T2, ...(T3)
+    SREG   T4, ...(T3)
+    csrrw  T1, CSR_MSCRATCH, T3    # mscratch restored
+
+Throughout that window mscratch holds an arbitrary caller value instead of
+the save-area pointer. Any trap taken there runs the trap prologue's own
+"csrrw sp, mscratch, sp", which faithfully adopts that value as its save
+pointer.
+
+Callers routinely reach this macro with an MMIO base in T3. InterruptsSSm-00
+arms MTIMECMP two instructions earlier and still holds the CLINT/ACLINT base
+(0x02004000 on our platform), so the handler writes its saved context into
+device registers, loads a return address from one of them, and jumps to zero:
+an unrecoverable instruction-access-fault loop (observed: >100k traps, test
+times out).
+
+This is not a race in practice. The interrupt that lands in the window is the
+timer the test has just armed, so on an implementation whose store reaches the
+device a cycle or two after the store instruction issues, it arrives at a fixed
+offset and hits the window every run. Merely shrinking the window does not help;
+we measured the interrupt landing precisely on the single remaining instruction.
+
+Fix by never displacing mscratch. The swap existed only to free a register, so
+stash T1 in mtval instead and read mscratch non-destructively. mtval is
+architecturally dead at this point: it is only meaningful after a trap, and this
+macro ends in an mret to a lower privilege mode.
+
+Deliberately does NOT mask mstatus.MIE around the window. That also closes the
+hole, but breaks tests that arm an interrupt immediately before entering the
+lower mode and require it to be taken -- InterruptsSSm-00 sets MIE and arms the
+timer for exactly that purpose, with a source comment saying so.
+
+If reusing mtval is unacceptable, the alternative is to extend the save area with
+one extra slot at a fixed offset; the requirement is only that mscratch remain
+valid for the whole macro.
+
+---
+--- a/tests/env/rvtest_trap_handler.h
++++ b/tests/env/rvtest_trap_handler.h
+@@ -726,12 +726,31 @@
+         //     register (T3) to the M-mode save area so this macro clobbers
+         //     nothing. T3 is swapped with mscratch so even T3's original value
+         //     can be captured; it is kept as the save-area pointer across the mret and restored last.
+-        csrrw  T3, CSR_MSCRATCH, T3               // T3 = M save area ptr, mscratch = orig T3
+-        SREG   T1, goto_lower_sv_off+0*REGWIDTH(T3) // save T1
+-        SREG   T2, goto_lower_sv_off+1*REGWIDTH(T3) // save T2
+-        SREG   T4, goto_lower_sv_off+2*REGWIDTH(T3) // save T4
+-        csrrw  T1, CSR_MSCRATCH, T3               // T1 = orig T3; mscratch = save area ptr (restored)
+-        SREG   T1, goto_lower_sv_off+3*REGWIDTH(T3) // save orig T3
++        // ZERO-WINDOW variant: mscratch is never displaced.
++        //
++        // The original sequence swaps orig T3 into mscratch and only restores it
++        // four instructions later. A trap in that window makes the trap prologue's
++        // own "csrrw sp, mscratch, sp" adopt orig T3 as its save pointer; callers
++        // reach here with T3 holding an MMIO base (e.g. the ACLINT), so the
++        // handler writes its context into a device window and returns to a garbage
++        // address -- an unrecoverable trap loop. Shrinking the window is not
++        // enough: the interrupt that triggers it can land deterministically on the
++        // remaining instruction.
++        //
++        // mtval is used as the one-instruction stash so mscratch keeps the
++        // save-area pointer at all times. mtval is architecturally dead here (it
++        // is only meaningful after a trap, and this macro ends in an mret to a
++        // lower mode). Deliberately does NOT touch mstatus.MIE: masking would
++        // break tests that arm an interrupt immediately before this macro and
++        // require it to be taken (InterruptsSSm-00 does exactly that).
++        csrw   CSR_MTVAL, T1                      // stash T1; mscratch untouched
++        csrr   T1, CSR_MSCRATCH                   // T1 = M save area ptr
++        SREG   T2, goto_lower_sv_off+1*REGWIDTH(T1) // save T2
++        SREG   T4, goto_lower_sv_off+2*REGWIDTH(T1) // save T4
++        SREG   T3, goto_lower_sv_off+3*REGWIDTH(T1) // save orig T3
++        csrr   T2, CSR_MTVAL                      // recover orig T1
++        SREG   T2, goto_lower_sv_off+0*REGWIDTH(T1) // save orig T1
++        mv     T3, T1                             // T3 = save area ptr (macro contract)
+ 
+         //---- Step 1: Set/clear mstatus.MPV (virtualization bit) ----
+    .if     ((\LMODE\()==VUmode) || (\LMODE\()==VSmode))

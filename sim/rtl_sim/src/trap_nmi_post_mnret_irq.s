@@ -57,6 +57,10 @@ nmi_handler:
     lw   s10,12(sp)
     addi sp, sp, 16
 
+    # Smdbltrp: MDT blocks MIE. Cleared here, not between the csrsi and the
+    # mnret -- the test needs those two adjacent.
+    csrw mstatush, x0
+
     # Enable M-mode interrupts immediately before mnret — only the mnret
     # itself sits between MIE=1 and the post-mnret instruction. IRQ
     # detection is blocked while mnret_taken is asserted, so the IRQ
@@ -106,6 +110,7 @@ irq_handler:
 
     # Publish NMI handler addr for the testbench's nmi_vector drive.
     la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
     sw   t0, 0x08(s1)
 
     # mtvec = IRQ trap entry point.
@@ -119,7 +124,7 @@ irq_handler:
     # Enable NMI (mnstatus.NMIE = 1)
     csrsi 0x744, 8
 
-    # Enable post-trap suppression (bit 2 of irqkill_cfg). This is the
+    # Enable post-trap suppression (bit 2 of marv_ctl). This is the
     # mechanism whose arming we are verifying.
     li   t0, 0x4
     csrw 0x7FF, t0

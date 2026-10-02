@@ -210,20 +210,18 @@ class TestConfig:
             else:
                 context[param_name] = param_info.get('default', 0)
 
-        # Safely evaluate the expression
+        # Evaluate in a restricted context. A malformed expression (e.g. C-style
+        # `&&`, an unknown parameter name) is a configuration error, not a
+        # satisfied requirement: fail closed so the entry cannot silently run in
+        # every configuration.
         try:
-            # Only allow simple comparison operators and logical operators
-            # Replace parameter names with their values
-            allowed_names = set(context.keys())
-            allowed_names.update(['True', 'False', 'and', 'or', 'not'])
-
-            # Evaluate in restricted context
             result = eval(requires_expr, {"__builtins__": {}}, context)
             return bool(result)
         except Exception as e:
-            # If evaluation fails, log warning and assume requirement is met
-            print(f"Warning: Failed to evaluate requires expression '{requires_expr}': {e}")
-            return True
+            raise ValueError(
+                f"run_config.json: cannot evaluate requires expression '{requires_expr}': {e}. "
+                f"Use Python syntax (and / or / not, ==, >=, ...) and only RTL parameter names."
+            ) from e
 
     def check_test_requirements(self, test_name: str, custom_rtl_values: Optional[dict] = None) -> tuple:
         """
@@ -369,6 +367,17 @@ class TestConfig:
         test_info = self.get_test_info(test_name)
         if test_info:
             return test_info.get('no_rsalu', False)
+        return False
+
+    def is_variants_light(self, test_name: str) -> bool:
+        """
+        Check if a test runs the light variant set: the base variant plus one run with
+        random ROM/SRAM/peripheral wait states and ALU stalls, instead of the full
+        timing matrix (option "variants": "light").
+        """
+        test_info = self.get_test_info(test_name)
+        if test_info:
+            return test_info.get('variants') == 'light'
         return False
 
     def is_no_rwsrom(self, test_name: str) -> bool:

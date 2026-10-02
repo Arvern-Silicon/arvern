@@ -22,6 +22,8 @@
 #     0x02000000 + 4*hart : MSIP[hart]   (MSWI window)
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -91,6 +93,11 @@ _start:
     la   t0, trap_handler
     csrw mtvec, t0
 
+    # Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+    # resets to 0, so boot code must set mnstatus.NMIE=1 before any
+    # ordinary interrupt can be delivered. Smrnmi is unconditional.
+    csrsi 0x744, 8              # mnstatus.NMIE = 1
+
     # MSIP[0] should reset to 0 (MSWI register is hclk-domain flop, reset 0)
     li   t0, ACLINT_MSIP0
     lw   t1, 0(t0)
@@ -100,6 +107,9 @@ _start:
     li   t0, 0x008
     csrs mie, t0
     li   t0, 0x008
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     li   x31, 0x11111111            # signal: ACLINT MSWI configured

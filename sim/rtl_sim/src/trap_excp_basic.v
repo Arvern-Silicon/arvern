@@ -15,8 +15,6 @@
 //   - Illegal instruction (MCAUSE = 2)
 //   - Load address misaligned (MCAUSE = 4)
 //   - Store address misaligned (MCAUSE = 6)
-//   - Load access fault (MCAUSE = 5)
-//   - Store access fault (MCAUSE = 7)
 //----------------------------------------------------------------------------
 
 `define LONG_TIMEOUT
@@ -27,7 +25,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -169,73 +167,12 @@ initial
 
 
       //=================================================================
-      // PHASE 5: Load access fault (MCAUSE = 5)
+      // PHASES 5 and 6 (load / store access fault) REMOVED in v0.1: data-bus
+      // errors are now an RNMI (mncause=3), not mcause 5/7, which are RESERVED
+      // for a PMP. Covered by trap_nmi_bus_error.
       //=================================================================
-      $display("");
-      $display("");
-      $display(" ====================================================================");
-      $display("|                 PHASE 5: LOAD ACCESS FAULT                         |");
-      $display(" ====================================================================");
-      $display("");
-      $display("Waiting for the firmware...");
-
-      @(probes_cpu.x31==32'h55555555);
-      repeat(3) @(posedge free_clk);
-
-      check_mem_value(`SPAD(32'h00), 32'h00000004);
-
-      $display("");
-      $display("--- MCAUSE verification (load access fault) ---");
-      check_mem_value(`SPAD(32'h50), 32'h00000005);
-
-      $display("");
-      $display("--- MEPC verification ---");
-      if (ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h54)] !==
-          ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h58)]) begin
-         $display("ERROR: MEPC mismatch -- MEPC: 0x%h / expected: 0x%h %t ns",
-                  ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h54)],
-                  ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h58)], $time);
-         error = error + 1;
-      end else begin
-         $display("PASS:  MEPC matches expected -- value: 0x%h %t ns",
-                  ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h54)], $time);
-      end
-
-
-      //=================================================================
-      // PHASE 6: Store access fault (MCAUSE = 7)
-      //=================================================================
-      $display("");
-      $display("");
-      $display(" ====================================================================");
-      $display("|                 PHASE 6: STORE ACCESS FAULT                        |");
-      $display(" ====================================================================");
-      $display("");
-      $display("Waiting for the firmware...");
-
-      @(probes_cpu.x31==32'h66666666);
-      repeat(3) @(posedge free_clk);
-
-      check_mem_value(`SPAD(32'h00), 32'h00000005);
-
-      $display("");
-      $display("--- MCAUSE verification (store access fault) ---");
-      check_mem_value(`SPAD(32'h60), 32'h00000007);
-
-      $display("");
-      $display("--- MEPC verification ---");
-      if (ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h64)] !==
-          ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h68)]) begin
-         $display("ERROR: MEPC mismatch -- MEPC: 0x%h / expected: 0x%h %t ns",
-                  ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h64)],
-                  ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h68)], $time);
-         error = error + 1;
-      end else begin
-         $display("PASS:  MEPC matches expected -- value: 0x%h %t ns",
-                  ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h64)], $time);
-      end
-
-
+      @(probes_cpu.x31 == 32'h55555555);
+      @(probes_cpu.x31 == 32'h66666666);
 
       //=================================================================
       // PHASE 7: Instruction access fault via JALR to 0x00000000
@@ -252,7 +189,7 @@ initial
       @(probes_cpu.x31==32'h77777777);
       repeat(3) @(posedge free_clk);
 
-      check_mem_value(`SPAD(32'h00), 32'h00000006);
+      check_mem_value(`SPAD(32'h00), 32'h00000004);
 
       $display("");
       $display("--- MCAUSE verification (instruction access fault) ---");
@@ -287,7 +224,7 @@ initial
       @(probes_cpu.x31==32'h88888888);
       repeat(3) @(posedge free_clk);
 
-      check_mem_value(`SPAD(32'h00), 32'h00000007);
+      check_mem_value(`SPAD(32'h00), 32'h00000005);
 
       $display("");
       $display("--- MCAUSE verification (instruction access fault) ---");

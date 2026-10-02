@@ -11,7 +11,7 @@
 //----------------------------------------------------------------------------
 // Description: NMI LOW-LATENCY KILL OF MULDIV/UOP
 //   Asserts that an NMI fired while a long DIV is in flight aborts the DIV
-//   (MNEPC points inside the DIV loop) even when irqkill_cfg.muldiv=0.
+//   (MNEPC points inside the DIV loop) even when marv_ctl.muldiv=0.
 //----------------------------------------------------------------------------
 
 `define LONG_TIMEOUT
@@ -22,7 +22,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -58,7 +58,6 @@ initial
          end else begin
             $display("PASS:  nmi_handler addr published: 0x%h %t ns", handler_addr, $time);
          end
-         nmi_vector = handler_addr;
       end
 
       check_mem_value(`SPAD(32'h00), 32'h00000000);   // nmi_count==0

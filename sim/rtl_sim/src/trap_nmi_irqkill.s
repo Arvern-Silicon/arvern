@@ -11,11 +11,11 @@
 #----------------------------------------------------------------------------
 # Description: NMI IRQKILL
 #   NMI irqkill verification (2 phases):
-#   Phase 1: irqkill enabled (irqkill_cfg default 0x7). NMI fires during
+#   Phase 1: irqkill enabled (marv_ctl default 0x7). NMI fires during
 #   a 33-cycle radix-2 DIV — the operation is killed immediately
 #   and the NMI handler is entered without waiting for completion.
 #   After mnret, division restarts and produces the correct result.
-#   Phase 2: irqkill disabled (irqkill_cfg=0x0). NMI fires during another
+#   Phase 2: irqkill disabled (marv_ctl=0x0). NMI fires during another
 #   33-cycle DIV — the NMI is held off until the div finishes,
 #   then taken. Div result is still correct (no restart needed).
 #
@@ -84,6 +84,7 @@ _start:
 
     # Store nmi_handler address for testbench to configure nmi_vector
     la   s2, nmi_handler
+    csrw 0x7FD, s2            # marv_nmvec = RNMI handler (firmware places its own vector)
     sw   s2, 0x0C(s1)
 
     # Install a minimal trap handler for mtvec (not expected to fire here,
@@ -91,7 +92,7 @@ _start:
     la   t0, _dummy_trap
     csrw mtvec, t0
 
-    # irqkill_cfg CSR is at 0x7FF.
+    # marv_ctl CSR is at 0x7FF.
     # After reset, default is 0x7 (bits[2:0]=1 => muldiv kill enabled).
     # Phase 1 uses this default — no write needed.
 
@@ -104,7 +105,7 @@ _start:
 
     #=================================================================
     # PHASE 1: NMI kills in-progress DIV (irqkill enabled, default)
-    # irqkill_cfg = 0x7 (default after reset): bit[0]=1 => muldiv kill
+    # marv_ctl = 0x7 (default after reset): bit[0]=1 => muldiv kill
     # is active.  Testbench asserts NMI shortly after the sync below.
     # The DIV is a 33-cycle radix-2 division.  With irqkill active the
     # hardware aborts the operation on NMI and enters the handler
@@ -133,7 +134,7 @@ _start:
 
     #=================================================================
     # PHASE 2: NMI deferred until DIV completes (irqkill disabled)
-    # Write 0x0 to irqkill_cfg (CSR 0x7FF) to disable all irqkill.
+    # Write 0x0 to marv_ctl (CSR 0x7FF) to disable all irqkill.
     # Testbench then asserts NMI while the same DIV is in progress.
     # With irqkill disabled, the NMI is held pending until the DIV
     # completes; nmi_count goes from 1 to 2 only after the result is

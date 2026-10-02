@@ -17,7 +17,7 @@ real mclk_period, mclk_frequency;
 time benchmark_start_time, benchmark_end_time;
 real benchmark_cycles, benchmark_cycles_scaled;
 integer local_scale_factor;
-integer benchmark_score;
+time    benchmark_score;
 
 initial
    begin
@@ -67,7 +67,7 @@ initial
       $timeformat(-3, 3, " ms", 10);
       $display("\nINFO-VERILOG: ========== BENCHMARK RESULTS ===========");
       $display("INFO-VERILOG: Execution time      : %t", (benchmark_end_time - benchmark_start_time));
-      $display("INFO-VERILOG: Clock cycles        : %0d", benchmark_cycles);
+      $display("INFO-VERILOG: Clock cycles        : %0.0f", benchmark_cycles);
       $display("INFO-VERILOG: Clock frequency     : %f MHz", mclk_frequency);
       $display("INFO-VERILOG: ========================================");
       $display("INFO-VERILOG: Embench Speed Result: %0d", benchmark_score);

@@ -26,14 +26,22 @@
 
 
 main:
-    j _start            # Reset Vector
-    j default_handler   # Default machine handler
-    j default_handler   # Default supervisor handler
+    # Default vector table: 4-byte slots regardless of -march (a c.j would halve them)
+    .option push
+    .option norvc
+    j _start            # reset_vector + 0   reset entry
+    j default_handler   # reset_vector + 4   RNMI / double-trap (marv_nmvec default)
+    j default_handler   # reset_vector + 8   M-mode trap (mtvec default)
+    j default_handler   # reset_vector + 12  S-mode trap (stvec default)
+    .option pop
 
 	#-------------------------------------------------
 	# WRITE SOME VALUES IN THE REGISTERS
 	#-------------------------------------------------
  _start:
+	csrsi 0x744, 8            # Smdbltrp: a trap in M-mode with NMIE=0 is an unexpected trap
+	csrw 0x310, x0      # mstatush.MDT = 0: MDT resets to 1, and a trap taken while
+	                    # it is set is an Smdbltrp double trap
 	li  x1,  0xFFFFFFFF
  	li  x2,  0xFFFFFFFF
  	li  x3,  0xFFFFFFFF

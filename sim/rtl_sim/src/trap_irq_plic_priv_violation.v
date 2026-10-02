@@ -26,7 +26,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -53,6 +53,20 @@ initial
       $display(" ====================================================================");
       $display("|             PHASE 1: PLIC configured, dropping to S                |");
       $display(" ====================================================================");
+      @(probes_cpu.x31==32'h1E1E1E1E);
+      repeat(3) @(posedge free_clk);
+
+      begin : program_vector
+         reg [31:0] handler_addr;
+         handler_addr = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h20)];
+         if (handler_addr == 32'h0) begin
+            $display("ERROR: nmi_handler address not published %t ns", $time);
+            error = error + 1;
+         end else begin
+            $display("PASS:  nmi_vector programmed to 0x%h %t ns", handler_addr, $time);
+         end
+      end
+
       @(probes_cpu.x31==32'h11111111);
       repeat(3) @(posedge free_clk);
 
@@ -68,8 +82,24 @@ initial
       repeat(3) @(posedge free_clk);
 
       check_mem_value(`SPAD(32'h00), 32'h00000001);                 // 1 trap fired
-      check_mem_value(`SPAD(32'h04), 32'h00000005);                 // cause = 5 (LAF)
-      check_mem_value(`SPAD(32'h08), 32'h0C200000);                 // mtval = PLIC_TH_M
+      check_mem_value(`SPAD(32'h04), 32'h80000003);                 // mncause = data-bus error
+      check_mem_value(`SPAD(32'h08), 32'h0C200000);                 // marv_eaddr = PLIC_TH_M
+
+      // THE PLATFORM CONTRACT (plan section 5): an S-mode containment breach
+      // escalates to M-mode as a NON-DELEGABLE RNMI, not a delegable S-mode
+      // fault. mnstatus.MNPP[12:11] must record the S-mode it came from, so
+      // mnret returns there.
+      begin : escalation
+         reg [31:0] mnst;
+         mnst = ahb_bus_system_inst.sram_x_inst.mem[`SPAD(32'h18)];
+         $display("mnstatus at RNMI entry = 0x%h  MNPP = %0d (1 = S-mode)",
+                  mnst, mnst[12:11]);
+         if (mnst[12:11] !== 2'b01) begin
+            $display("ERROR: MNPP = %0d, expected 1 (S) -- the RNMI must record the", mnst[12:11]);
+            $display("       privilege it escalated FROM %t ns", $time);
+            error = error + 1;
+         end
+      end
       $display("PASS:  S-mode load to ctx-0 threshold AHB-ERRORed and trapped %t ns",
                $time);
 
@@ -85,8 +115,8 @@ initial
       repeat(3) @(posedge free_clk);
 
       check_mem_value(`SPAD(32'h00), 32'h00000002);                 // 2 traps total
-      check_mem_value(`SPAD(32'h0C), 32'h00000007);                 // cause = 7 (SAF)
-      check_mem_value(`SPAD(32'h10), 32'h0C002000);                 // mtval = PLIC_EN_M
+      check_mem_value(`SPAD(32'h0C), 32'h80000003);                 // mncause = data-bus error
+      check_mem_value(`SPAD(32'h10), 32'h0C002000);                 // marv_eaddr = PLIC_EN_M
       $display("PASS:  S-mode store to ctx-0 enable AHB-ERRORed and trapped %t ns",
                $time);
 
@@ -103,6 +133,10 @@ initial
 
       check_mem_value(`SPAD(32'h00), 32'h00000002);                 // still 2 traps
       check_mem_value(`SPAD(32'h14), 32'h00000000);                 // ctx1 threshold = 0
+
+      $display("");
+      $display("--- mtvec must NEVER be entered (5/7 RESERVED) ---");
+      check_mem_value(`SPAD(32'h1C), 32'h00000000);
       $display("PASS:  S-mode load to ctx-1 threshold succeeded %t ns", $time);
 
 

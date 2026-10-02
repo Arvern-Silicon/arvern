@@ -25,6 +25,8 @@
 #   a0 = 1  →  return to M-mode (M handler) or S-mode (S handler)
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -209,6 +211,7 @@ s_handler_done:
     #=================================================================
  _start:
     li   sp, 0x80010000
+    PMP_ALLOW_ALL               # grant the address space before leaving M-mode
     li   s1, 0x80000000        # Scratchpad base
 
     # Zero scratchpad
@@ -266,6 +269,9 @@ s_handler_done:
     li   t0, 0x1800
     csrc mstatus, t0           # Clear MPP
     li   t0, 0x0800
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0           # MPP = 01 (S-mode)
 
     # Clear MPIE so MIE stays 0 after MRET

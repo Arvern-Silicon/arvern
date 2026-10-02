@@ -27,8 +27,7 @@
 
 # Check if rtl_params.tcl was sourced
 if {![info exists RTL_PARAM_M_EXTENSION] || ![info exists RTL_PARAM_ZICNTR_EN] ||
-    ![info exists RTL_PARAM_ZIHPM_NR]   || ![info exists RTL_PARAM_SINGLE_CYCLE_BRANCH] ||
-    ![info exists RTL_PARAM_MVENDORID]} {
+    ![info exists RTL_PARAM_ZIHPM_NR]   || ![info exists RTL_PARAM_SINGLE_CYCLE_BRANCH]} {
     puts "Warning: RTL parameters not loaded - skipping configuration report"
     set ::RTL_CONFIG ""
     return
@@ -52,14 +51,15 @@ array set param_desc {
     MUL_TYPE            "Multiplier Implementation"
     DIV_TYPE            "Divider Implementation"
     CCSR_EN             "Custom CSR Interface"
-    NMI_EN              "Smrnmi (Resumable NMI)"
     SU_MODE_EN          "S+U Privilege Modes"
+    PMP_NR              "Physical Memory Protection"
     ZICNTR_EN           "Zicntr Counters"
     ZIHPM_NR            "Zihpm Counters"
     RV32E_EN            "Embedded ISA"
     SINGLE_CYCLE_BRANCH "Taken-branch latency"
     ASYNC_RST_EN        "Reset architecture"
-    MVENDORID           "JEDEC vendor ID (mvendorid)"
+    DEBUG_EN            "External Debug (Sdext)"
+    DM_TRIGGER_NR       "Sdtrig HW Triggers"
 }
 
 # M_EXTENSION value descriptions
@@ -127,13 +127,40 @@ if {$zihpm_val == 0} {
 }
 append ::RTL_CONFIG [format "     |                      %-27s : %-46s |\n" $param_desc(ZIHPM_NR) $zihpm_str]
 
-set nmi_val $RTL_PARAM_NMI_EN
-set nmi_str [expr {$nmi_val == 1 ? "Enabled " : "Disabled"}]
-append ::RTL_CONFIG [format "     |                      %-27s : %-46s |\n" $param_desc(NMI_EN) $nmi_str]
-
 set sumode_val $RTL_PARAM_SU_MODE_EN
 set sumode_str [expr {$sumode_val == 1 ? "Enabled (M + S + U modes)" : "Disabled (M-mode only)"}]
 append ::RTL_CONFIG [format "     |                      %-27s : %-46s |\n" $param_desc(SU_MODE_EN) $sumode_str]
+
+# PMP_NR: writable entries (0/4/8/16); Smepmp (mseccfg) is included whenever non-zero.
+if {[info exists RTL_PARAM_PMP_NR]} {
+    set pmp_val $RTL_PARAM_PMP_NR
+    set pmp_str [expr {$pmp_val == 0 ? "Disabled" : "$pmp_val writable entries + Smepmp"}]
+    append ::RTL_CONFIG [format "     |                      %-27s : %-46s |\n" $param_desc(PMP_NR) $pmp_str]
+}
+
+# External Debug section (Sdext / Sdtrig). Guarded by [info exists] so an older
+# rtl_params.tcl without the debug parameters still produces a valid report.
+if {[info exists RTL_PARAM_DEBUG_EN]} {
+    append ::RTL_CONFIG "     | EXTERNAL DEBUG:                                                                                   |\n"
+
+    set debug_val $RTL_PARAM_DEBUG_EN
+    set debug_str [expr {$debug_val == 1 ? "Enabled (DM + abstract access + SBA)" : "Disabled"}]
+    append ::RTL_CONFIG [format "     |                      %-27s : %-46s |\n" $param_desc(DEBUG_EN) $debug_str]
+
+    # DM_TRIGGER_NR is gated by DEBUG_EN in the RTL (no triggers when debug is absent).
+    if {[info exists RTL_PARAM_DM_TRIGGER_NR]} {
+        if {$debug_val != 1} {
+            set trig_str "Not present"
+        } elseif {$RTL_PARAM_DM_TRIGGER_NR == 0} {
+            set trig_str "None"
+        } elseif {$RTL_PARAM_DM_TRIGGER_NR == 1} {
+            set trig_str "1 mcontrol6 trigger"
+        } else {
+            set trig_str "$RTL_PARAM_DM_TRIGGER_NR mcontrol6 triggers"
+        }
+        append ::RTL_CONFIG [format "     |                      %-27s : %-46s |\n" $param_desc(DM_TRIGGER_NR) $trig_str]
+    }
+}
 
 # Arithmetic Units section
 append ::RTL_CONFIG "     | ARITHMETIC UNITS:                                                                                 |\n"
@@ -172,7 +199,6 @@ if {[info exists RTL_PARAM_ASYNC_RST_EN]} {
     append ::RTL_CONFIG [format "     |                      %-27s : %-46s |\n" $param_desc(ASYNC_RST_EN) $arst_str]
 }
 
-append ::RTL_CONFIG [format "     |                      %-27s : %-46s |\n" $param_desc(MVENDORID) $RTL_PARAM_MVENDORID]
 append ::RTL_CONFIG "     +===================================================================================================+\n"
 
 puts ""

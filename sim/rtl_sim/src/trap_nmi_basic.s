@@ -14,7 +14,7 @@
 #   - NMI handler entered when nmi_i asserts
 #   - mnepc saved to scratchpad (address of interrupted instruction)
 #   - mnstatus at entry: NMIE=0 (bit3), MNPP=11 (bits12:11) = M-mode
-#   - mncause = 0x80000000 at NMI entry (bit[31]=1, cause=0)
+#   - mncause = 0x80000002 at NMI entry (bit[31]=1, cause=2 = RNMI input pin)
 #   - mnret resumes execution at mnepc
 #   - NMIE=1 after mnret (mnstatus_after_ret checked after handler returns)
 #
@@ -22,7 +22,7 @@
 #   0x000: nmi_count           (incremented each NMI entry)
 #   0x004: last_mnepc          (mnepc value saved at NMI entry)
 #   0x008: mnstatus_at_entry   (mnstatus value at NMI entry)
-#   0x00C: mncause_at_entry    (mncause value at NMI entry, expect 0)
+#   0x00C: mncause_at_entry    (mncause value at NMI entry, expect 0x80000002)
 #   0x010: mnstatus_after_ret  (mnstatus value read after mnret)
 #   0x014: nmi_handler_addr    (address of nmi_handler, for testbench)
 #----------------------------------------------------------------------------
@@ -61,7 +61,7 @@ nmi_handler:
     csrr t2, 0x744          # mnstatus = 0x744
     sw   t2, 0x08(s1)
 
-    # Save MNCAUSE (expect 0 - implementation-defined, always 0)
+    # Save MNCAUSE (expect 0x80000002 -- cause 2 = external RNMI input pin)
     csrr t0, 0x742          # mncause = 0x742
     sw   t0, 0x0C(s1)
 
@@ -89,6 +89,7 @@ _start:
 
     # Store nmi_handler address in scratchpad for testbench to read
     la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
     sw   t0, 0x14(s1)          # nmi_handler_addr
 
     # Install a safe mtvec (regular exceptions go here)

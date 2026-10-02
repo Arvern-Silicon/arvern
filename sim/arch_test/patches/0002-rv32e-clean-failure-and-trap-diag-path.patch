@@ -1,0 +1,143 @@
+From: aRVern-dev <arvernsilicon@gmail.com>
+Subject: [PATCH] env: make the failure/trap-diagnostic path RV32E-clean
+
+The whole rv32e test suite fails to assemble. Every test under tests/rv32e/
+pulls in rvtest_failure_code.h through RVTEST_BEGIN, and that file uses
+registers outside x0-x15 unconditionally, so `-march=rv32e_* -mabi=ilp32e`
+stops with "illegal operands" before a single ELF is produced:
+
+    tests/env/rvtest_failure_code.h:332: Error: illegal operands `sw x16,128(x4)'
+    ...
+    tests/env/rvtest_failure_code.h:1560: Error: illegal operands `la x16,trap_diag_fail_str_ptr'
+
+There are two independent causes.
+
+1. failedtest_saveregs dumps x16-x31 to the failure scratch area. This is a
+   one-way save for reporting -- nothing reloads those slots -- so it is simply
+   guarded with #ifndef E_SUPPORTED, matching the guard rvtest_setup.h already
+   uses around its x16-x31 initialisation.
+
+2. The trap-diagnostic code uses x16 as a throwaway address register in seven
+   places. All of them sit after failedtest_saveregs, where every register
+   except DEFAULT_TEMP_REG/DEFAULT_LINK_REG is free scratch, so x16 carries no
+   meaning; it is replaced by the assembler's symbol-addressing forms:
+
+     - the two loads become `LREG rd, symbol`, which uses rd as its own temp;
+     - the five stores become `sw rs, symbol, x7`. x7 is dead at each site --
+       it is either an already-consumed RV64 splice temp (the fail-string save)
+       or a string address whose `bne` has just been taken (every site in the
+       subtype dispatch, including the three reached only by `j`/fall-through,
+       whose documented inputs are x8 and x9).
+
+Behaviour is unchanged on RV32I/RV64I: the guarded block is compiled as before,
+and the rewritten sequences are the same stores and loads with one fewer
+instruction.
+
+Verified, since these blocks only execute on a failing test:
+  - rv32e assembles and the full rv32e suite (E/Zca/Zmmul, 69 tests) passes;
+  - rv64i still assembles (tests/priv/Sm against config/spike/spike-rv64-max),
+    covering the `sd`/`ld` expansion of the SREG/LREG symbol forms;
+  - a deliberately failing run was used to execute the diagnostic path itself.
+    A trap-count mismatch reaches failedtest_saveresults_trap ->
+    trap_diag_offset_mismatch -> failedtest_report_trap_detailed and prints a
+    coherent report with no secondary trap;
+  - for the remaining sites, x7-dead-on-entry was confirmed in the disassembly:
+    trap_diag_field_identified and trap_diag_generic_report both jump to
+    failedtest_saveresults_common, whose first use of x7 is a write, and the
+    subtype-0 default store is immediately followed by `la x7, sv_Mvect_str`.
+
+With this, an RV32E config builds and runs the rv32e suite.
+
+Note: the tests themselves are already RV32E-clean. This is entirely harness
+code under tests/env/.
+
+diff --git a/tests/env/rvtest_failure_code.h b/tests/env/rvtest_failure_code.h
+index 6063982..09795c0 100644
+--- a/tests/env/rvtest_failure_code.h
++++ b/tests/env/rvtest_failure_code.h
+@@ -329,6 +329,7 @@
+         SREG x13, 104(DEFAULT_TEMP_REG)
+         SREG x14, 112(DEFAULT_TEMP_REG)
+         SREG x15, 120(DEFAULT_TEMP_REG)
++    #ifndef E_SUPPORTED
+         SREG x16, 128(DEFAULT_TEMP_REG)
+         SREG x17, 136(DEFAULT_TEMP_REG)
+         SREG x18, 144(DEFAULT_TEMP_REG)
+@@ -345,6 +346,7 @@
+         SREG x29, 232(DEFAULT_TEMP_REG)
+         SREG x30, 240(DEFAULT_TEMP_REG)
+         SREG x31, 248(DEFAULT_TEMP_REG)
++    #endif // !E_SUPPORTED
+ 
+     #ifdef RVTEST_VECTOR
+         # We need to ensure that VS is set in mstatus here, as VS off is an exceptions test
+@@ -928,8 +930,7 @@
+     #else
+         lw x6, REGWIDTH(DEFAULT_LINK_REG)
+     #endif
+-        la x16, trap_diag_fail_str_ptr
+-        SREG x6, 0(x16)                            # save for later printing
++        SREG x6, trap_diag_fail_str_ptr, x7        # save for later printing
+ 
+         //--------------------------------------------------------------
+         // Load the address of the failing check (instruction pointer)
+@@ -950,8 +951,7 @@
+         // This tells us which word of the trap signature mismatched and
+         // which privilege mode the trap was being handled in.
+         //--------------------------------------------------------------
+-        la x16, trap_diag_fail_str_ptr
+-        LREG x6, 0(x16)                             # reload fail string ptr
++        LREG x6, trap_diag_fail_str_ptr             # reload fail string ptr
+ 
+         // ---- Check for trap_sig_offset_mismatch (from RVTEST_CODE_END) ----
+         la x7, trap_sig_offset_mismatch
+@@ -964,8 +964,7 @@
+ 
+         // Default: unknown subtype, just record the string and skip to common print
+         li x8, 0                                     # subtype = 0 (unknown)
+-        la x16, trap_diag_subtype
+-        sw x8, 0(x16)
++        sw x8, trap_diag_subtype, x7
+ 
+         //--- M-mode trap signature field checks ---
+         la x7, sv_Mvect_str
+@@ -1143,8 +1142,7 @@
+         //--------------------------------------------------------------
+     trap_diag_offset_mismatch:
+         li x8, 9                                     # subtype: offset mismatch
+-        la x16, trap_diag_subtype
+-        sw x8, 0(x16)
++        sw x8, trap_diag_subtype, x7
+ 
+         j failedtest_saveresults_common
+ 
+@@ -1152,16 +1150,13 @@
+         // FIELD IDENTIFIED: subtype in x8, mode in x9
+         //--------------------------------------------------------------
+     trap_diag_field_identified:
+-        la x16, trap_diag_subtype
+-        sw x8, 0(x16)
+-        la x16, trap_diag_mode
+-        sw x9, 0(x16)
++        sw x8, trap_diag_subtype, x7
++        sw x9, trap_diag_mode, x7
+         j failedtest_saveresults_common
+ 
+     trap_diag_generic_report:
+         // Unknown trap failure string -- fall through to common with subtype 0
+-        la x16, trap_diag_subtype
+-        sw zero, 0(x16)
++        sw zero, trap_diag_subtype, x7
+         j failedtest_saveresults_common
+ 
+ 
+@@ -1557,8 +1552,7 @@
+         // Print the original failure description string
+         LA(a0, trap_diag_origstr_label)
+         call rvmodel_io_write_str
+-        la x16, trap_diag_fail_str_ptr
+-        LREG a0, 0(x16)
++        LREG a0, trap_diag_fail_str_ptr
+         call rvmodel_io_write_str
+         LA(a0, newlinestr)
+         call rvmodel_io_write_str

@@ -69,3 +69,6 @@
 # this waiver and drop the pre-compile `check_timing` redirect in
 # synthesis.tcl (~L60).
 ^Warning: The following end-points are not constrained for maximum delay\.$
+
+# --- Parameterized-design name collision on the generic flop `arv_dff`
+^Warning: Design 'arv_dff_[^']+' was renamed to '[^']+' to avoid

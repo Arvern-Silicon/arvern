@@ -8,14 +8,14 @@
 # Usage Examples:
 #   ./run inst_add                           # Run inst_add test once (standard mode)
 #   ./run inst_add -c_mode                   # Run inst_add in compressed instruction mode
-#   ./run inst_add -all                      # Run inst_add with all 32 timing variants
-#   ./run inst_add -all -n 5                 # Run inst_add with all 32 variants, 5 iterations
+#   ./run inst_add -all                      # Run inst_add with all 36 timing variants
+#   ./run inst_add -all -n 5                 # Run inst_add with all 36 timing variants, 5 iterations
 #   ./run inst_add -rwsrom -rsalu            # Run with random ROM wait states and ALU stalls
 #   ./run inst_add -seed 12345               # Run with specific seed (reproducible)
 #   ./run inst_add -rtl_config 14            # Build sweep config #14's RTL, run inst_add (reproduce a sweep failure)
 #   ./run inst_add -rtl_config 14 -rsalu -seed 4242  # ...with the exact failing variant + seed
-#   ./run inst_add inst_mul -all             # Run two tests with all 32 timing variants each
-#   ./run inst_add inst_mul inst_lui -all    # Run three tests with all 32 timing variants each
+#   ./run inst_add inst_mul -all             # Run two tests with all 36 timing variants each
+#   ./run inst_add inst_mul inst_lui -all    # Run three tests with all 36 timing variants each
 #   ./run inst_add inst_mul -all -j 2        # Run two tests in parallel with all variants
 #   ./run inst_add -nodump                   # Run without generating VCD waveform file
 #   ./run hello_world                        # Run C-based test (from src-c/)
@@ -98,8 +98,48 @@ export SIMULATION_NODUMP
 #   - vcs       : VCS
 #   - vsim      : Modelsim
 #   - isim      : Xilinx simulator
-VERILOG_SIMULATOR=iverilog
-export VERILOG_SIMULATOR
+# Deliberately NOT defaulted here: runsim.py picks per test, so that the C
+# benchmarks (is_benchmark in run_config.json) get Verilator -- they run to
+# hundreds of millions of ticks and are pure throughput measurements, where the
+# compiled simulator is minutes faster -- while everything else stays on Icarus.
+# Exporting a default here would pre-empt that choice, since runsim only fills it
+# in when it is unset. An explicit VERILOG_SIMULATOR from the caller still wins.
+if [ -n "${VERILOG_SIMULATOR}" ]; then
+    export VERILOG_SIMULATOR
+fi
+
+# -cov: coverage for THIS test alone, into run/cov/single/<test>/ so it never collides
+# with the whole-regression sweep in run/cov/.
+COV_MODE=0
+ARGS=()
+for a in "${FILTERED_ARGS[@]}"; do
+    if [ "$a" = "-cov" ]; then COV_MODE=1; else ARGS+=("$a"); fi
+done
+FILTERED_ARGS=("${ARGS[@]}")
+
+if [ $COV_MODE -eq 1 ]; then
+    if ! command -v verilator >/dev/null 2>&1; then
+        echo "ERROR: -cov needs Verilator (>= 5.0, for --binary --timing)"; exit 1
+    fi
+    tname="${FILTERED_ARGS[0]:-unknown}"
+    COV_RTL="$(cd ../../../rtl/verilog 2>/dev/null && pwd)/"
+    COV_DIR="$(pwd)/cov/single/$(printf '%s' "$tname" | tr -c 'A-Za-z0-9_' '_')"
+    VERILOG_SIMULATOR=verilator
+    SIMULATION_COVERAGE=1
+    SIMULATION_COV_DATS="$COV_DIR/dats"
+    export VERILOG_SIMULATOR SIMULATION_COVERAGE SIMULATION_COV_DATS
+    rm -rf "$COV_DIR"; mkdir -p "$COV_DIR/dats"
+fi
 
 # Run the test
 ../bin/runsim.py "${FILTERED_ARGS[@]}"
+RC=$?
+
+if [ $COV_MODE -eq 1 ]; then
+    echo
+    python3 ../bin/cov_report.py "$COV_DIR/dats" --rtl "$COV_RTL"
+    echo
+    python3 ../bin/cov_html.py   "$COV_DIR/dats" -o "$COV_DIR/coverage.html" --rtl "$COV_RTL"
+    echo "  report: $COV_DIR/coverage.html"
+fi
+exit $RC

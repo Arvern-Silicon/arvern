@@ -13,10 +13,9 @@
 //   Smrnmi CSR read/write verification (no NMI triggered):
 //   - mnscratch (0x740): full 32-bit R/W
 //   - mnepc     (0x741): R/W, bit[0] hardwired 0
-//   - mncause   (0x742): WARL, constant 0x80000000 (bit[31]=1, cause=0)
+//   - mncause   (0x742): WARL read-only, 0x80000002 (bit[31]=1, cause 2 = RNMI pin)
 //   - mnstatus  (0x744): bit[3]=NMIE software-set-only (clear has no
 //   effect), bits[12:11]=MNPP WARL R/W, rest=0
-//   - nmi_vector(0xFFF): read-only, returns nmi_vector_i
 //
 //   Scratchpad layout (base 0x80000000):
 //   0x000: mnscratch_rb
@@ -24,7 +23,6 @@
 //   0x008: mncause_rb
 //   0x00C: mnstatus_rb           (PHASE3 sub-1: NMIE write-0 @ NMIE=0)
 //   0x010: nmi_handler_addr
-//   0x014: nmi_vector_rb
 //   0x018: mnstatus_nmie_set_rb  (PHASE3 sub-2: csrsi 8, expect NMIE=1)
 //   0x01C: mnstatus_csrw0_rb     (PHASE3 sub-3: csrw 0 @ NMIE=1; NMIE=1)
 //   0x020: mnstatus_csrrci_rb    (PHASE3 sub-4: csrrci 8 @ NMIE=1; NMIE=1)
@@ -40,7 +38,7 @@ integer allow_peripheral_accesses;
 
 // Scratchpad word address offset (byte address / 4)
 // SRAM base is 0x80000000, word-addressed starting at 0
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -57,9 +55,6 @@ initial
 
       // No NMI is triggered in this test, but disable error-on-exception for safety
       error_on_exception = 0;
-
-      // Pre-load nmi_vector with a known test value before firmware reads CSR 0xFFF in phase 4
-      nmi_vector = 32'hDEAD1234;
 
 
       //=================================================================
@@ -110,8 +105,8 @@ initial
       check_mem_value(`SPAD(32'h04), 32'h20000020);
 
       $display("");
-      $display("--- MNCAUSE readback (constant 0x80000000: bit[31]=1, cause=0) ---");
-      check_mem_value(`SPAD(32'h08), 32'h80000000);
+      $display("--- MNCAUSE readback (0x80000002: bit[31]=1, cause 2 = RNMI pin) ---");
+      check_mem_value(`SPAD(32'h08), 32'h80000002);
 
 
       //=================================================================
@@ -230,29 +225,14 @@ initial
       $display("--- Cross-check: earlier scratchpad values unchanged ---");
       check_mem_value(`SPAD(32'h00), 32'h5A5A5A5A);   // mnscratch_rb
       check_mem_value(`SPAD(32'h04), 32'h20000020);   // mnepc_rb
-      check_mem_value(`SPAD(32'h08), 32'h80000000);   // mncause_rb
+      check_mem_value(`SPAD(32'h08), 32'h80000002);   // mncause_rb
 
 
-      //=================================================================
-      // PHASE 4: nmi_vector read-only CSR at 0xFFF
-      // Drive a known value on nmi_vector, then verify firmware read it back
-      //=================================================================
-      $display("");
-      $display("");
-      $display(" ====================================================================");
-      $display("|                 PHASE 4: NMI_VECTOR CSR 0xFFF READ                 |");
-      $display(" ====================================================================");
-      $display("");
-      $display("Waiting for the firmware...");
-
-      @(probes_cpu.x31==32'hdeadbeef);
+      // Level-sensitive: with phase 4 gone the firmware reaches the sentinel almost
+      // immediately after the phase-3 sync, so an edge-triggered wait can miss it.
+      wait(probes_cpu.x31==32'hdeadbeef);
       random_irq_enable = 0;
       repeat(3) @(posedge free_clk);
-
-      $display("");
-      $display("--- NMI_VECTOR readback via CSR 0xFFF (expect 0xDEAD1234) ---");
-      check_mem_value(`SPAD(32'h14), 32'hDEAD1234);
-
 
       //=================================================================
       // END OF TEST

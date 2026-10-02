@@ -30,7 +30,21 @@
 #   0x14: p5_count — mhpmcounter3 for platform event 5 (expect 4)
 #   0x18: p6_count — mhpmcounter3 for platform event 6 (expect 4)
 #   0x1C: p7_count — mhpmcounter3 for platform event 7 (expect 4)
+#
+#   ZIHPM_NR == 0: the bench pulses the same pins, but the HPM CSRs are absent
+#   (arvern_instructions.md, Zihpm: "at ZIHPM_NR = 0 the extension is absent
+#   and every mhpmcounter* / mhpmevent* access raises illegal-instruction";
+#   spec_compliance_notes.md, same two-case rule). The firmware owns mtvec
+#   and probes csrr mhpmcounter3 / csrr mhpmevent3 / csrw mhpmevent3 before
+#   the pulses and csrr mhpmcounter3 / csrr mhpmevent3 after each one; every
+#   access must trap with mcause 2 and leave rd untouched.
+#     0x00 + 4i: illegal traps in round i (expect 2)
+#     0x40 + 4i: rd after the round-i probes (expect 0xA5A5A5A5)
+#     0x60: traps of the initial probe (expect 3)  0x64: its rd (0xA5A5A5A5)
+#     0x68: traps with mcause != 2 (expect 0)
 #----------------------------------------------------------------------------
+
+.include "firmware_config.inc"
 
 .section .text
 .global main
@@ -41,6 +55,9 @@
 
 
 main:
+.if CFG_ZIHPM_NR == 0
+    j    no_hpm
+.endif
     jal  t0, _random_irq_init        # set up trap handler, enable MIE
 
     li   sp, 0x80010000
@@ -241,3 +258,77 @@ plat7_delay:
 
 end_of_test:
     j    end_of_test
+
+.if CFG_ZIHPM_NR == 0
+#=========================================================================
+# ZIHPM_NR == 0: HPM CSRs absent -- every access is an illegal instruction.
+# Handler: count in s4, count of mcause != 2 in s5, skip the 4-byte CSR op.
+#=========================================================================
+    .align 2
+ill_handler:
+    csrr a4, mcause
+    addi s4, s4, 1
+    li   a5, 2
+    beq  a4, a5, 1f
+    addi s5, s5, 1
+1:  csrr a4, mepc
+    addi a4, a4, 4
+    csrw mepc, a4
+    mret
+
+.macro HPM_PROBE_AFTER slot, rslot
+    li   t0, 30
+2:  addi t0, t0, -1
+    bnez t0, 2b
+    li   s4, 0
+    li   t0, 0xA5A5A5A5
+    csrr t0, MHPMCOUNTER3
+    csrr t0, MHPMEVENT3
+    sw   s4, \slot(s1)
+    sw   t0, \rslot(s1)
+.endm
+
+no_hpm:
+    csrsi 0x744, 8                   # mnstatus.NMIE = 1
+    csrw  mstatush, x0               # mstatus.MDT   = 0
+    la   t0, ill_handler
+    csrw mtvec, t0
+    li   sp, 0x80010000
+    li   s1, 0x80000000
+    li   s5, 0
+
+    li   s4, 0
+    li   t0, 0xA5A5A5A5
+    csrr t0, MHPMCOUNTER3
+    csrr t0, MHPMEVENT3
+    li   t1, 0x0B
+    csrw MHPMEVENT3, t1
+    sw   s4, 0x60(s1)
+    sw   t0, 0x64(s1)
+
+    li   t0, 20                      # let the bench reach its first wait
+3:  addi t0, t0, -1
+    bnez t0, 3b
+
+    li   x31, 0x11111111
+    HPM_PROBE_AFTER 0x00, 0x40
+    li   x31, 0x22222222
+    HPM_PROBE_AFTER 0x04, 0x44
+    li   x31, 0x33333333
+    HPM_PROBE_AFTER 0x08, 0x48
+    li   x31, 0x44444444
+    HPM_PROBE_AFTER 0x0C, 0x4C
+    li   x31, 0x55555555
+    HPM_PROBE_AFTER 0x10, 0x50
+    li   x31, 0x66666666
+    HPM_PROBE_AFTER 0x14, 0x54
+    li   x31, 0x77777777
+    HPM_PROBE_AFTER 0x18, 0x58
+    li   x31, 0x88888888
+    HPM_PROBE_AFTER 0x1C, 0x5C
+
+    sw   s5, 0x68(s1)
+    lw   zero, 0x68(s1)
+    li   x31, 0xdeadbeef
+    j    end_of_test
+.endif

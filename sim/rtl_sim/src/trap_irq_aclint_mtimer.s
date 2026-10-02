@@ -20,20 +20,22 @@
 #   ACLINT address map (SiFive CLINT-compatible base = 0x02000000):
 #     MTIMECMP_LO[0] = 0x02004000
 #     MTIMECMP_HI[0] = 0x02004004
-#     MTIME_LO       = 0x02004008
-#     MTIME_HI       = 0x0200400C
+#     MTIME_LO       = 0x0200BFF8
+#     MTIME_HI       = 0x0200BFFC
 #
 #   AHB-read protocol: firmware MUST read MTIME_LO first (triggers the
 #   atomic snapshot), then MTIME_HI (returns the buffered upper half).
 #----------------------------------------------------------------------------
+
+.include "firmware_config.inc"
 
 .section .text
 .global main
 
 .equ ACLINT_MTIMECMP_LO,  0x02004000
 .equ ACLINT_MTIMECMP_HI,  0x02004004
-.equ ACLINT_MTIME_LO,     0x02004008
-.equ ACLINT_MTIME_HI,     0x0200400C
+.equ ACLINT_MTIME_LO,     0x0200BFF8
+.equ ACLINT_MTIME_HI,     0x0200BFFC
 
 #=========================================================================
 # SRAM scratchpad
@@ -104,6 +106,11 @@ _start:
     la   t0, trap_handler
     csrw mtvec, t0
 
+    # Smrnmi (ratified): "When NMIE=0, all interrupts are disabled" and NMIE
+    # resets to 0, so boot code must set mnstatus.NMIE=1 before any
+    # ordinary interrupt can be delivered. Smrnmi is unconditional.
+    csrsi 0x744, 8              # mnstatus.NMIE = 1
+
     # Read current MTIME (LO first, then HI — atomic-snapshot contract)
     li   t0, ACLINT_MTIME_LO
     lw   t1, 0(t0)                  # mtime_lo (also triggers snapshot)
@@ -130,6 +137,9 @@ _start:
     li   t0, 0x080
     csrs mie, t0
     li   t0, 0x008
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0
 
     li   x31, 0x11111111            # signal: ACLINT MTIMER configured

@@ -18,58 +18,66 @@
 module  arv_fetch (
 
 // AHB CLOCK & RESET
-    input  wire           hclk_i,
-    input  wire           hresetn_i,
+    input  wire             hclk_i,
+    input  wire             hresetn_i,
 
 // INSTRUCTION AHB BUS
-    input  wire    [31:0] inst_hrdata_i,
-    input  wire           inst_hready_i,
-    input  wire           inst_hresp_i,
+    input  wire      [31:0] inst_hrdata_i,
+    input  wire             inst_hready_i,
+    input  wire             inst_hresp_i,
 
-    output wire    [31:0] inst_haddr_o,
-    output wire     [2:0] inst_hburst_o,
-    output wire           inst_hmastlock_o,
-    output wire     [3:0] inst_hprot_o,
-    output wire     [2:0] inst_hsize_o,
-    output wire           inst_hsmode_o,
-    output wire     [1:0] inst_htrans_o,
-    output wire    [31:0] inst_hwdata_o,
-    output wire           inst_hwrite_o,
+    output wire      [31:0] inst_haddr_o,
+    output wire       [2:0] inst_hburst_o,
+    output wire             inst_hmastlock_o,
+    output wire       [3:0] inst_hprot_o,
+    output wire       [2:0] inst_hsize_o,
+    output wire             inst_hsmode_o,
+    output wire       [1:0] inst_htrans_o,
+    output wire      [31:0] inst_hwdata_o,
+    output wire             inst_hwrite_o,
 
 // INTERFACE TO DECODER
-    input  wire           id_branch_detect_i,
-    input  wire           id_branch_cancel_i,
-    input  wire    [31:0] id_branch_target_i,
-    input  wire    [31:0] id_branch_target_nxt_i,
-    input  wire           id_slow_branch_i,
-    input  wire    [31:0] id_slow_branch_target_i,
-    input  wire           ex_uop_has_branch_i,
-    input  wire           id_instruction_request_i,
-    output wire    [31:0] id_instruction_o,
-    output wire           id_instruction_valid_o,
-    output wire    [31:0] id_pc_o,
-    output wire     [1:0] id_priv_mode_o,
+    input  wire             id_branch_detect_i,
+    input  wire             id_branch_cancel_i,
+    input  wire      [31:0] id_branch_target_i,
+    input  wire      [31:0] id_branch_target_nxt_i,
+    input  wire             id_slow_branch_i,
+    input  wire      [31:0] id_slow_branch_target_i,
+    input  wire             ex_uop_has_branch_i,
+    input  wire             id_instruction_request_i,
+    output wire      [31:0] id_instruction_o,
+    output wire             id_instruction_valid_o,
+    output wire      [31:0] id_pc_o,
+    output wire       [1:0] id_priv_mode_o,
 
 // INTERFACE TO TRAP HANDLER
-    input  wire           if_stop_cmd_i,
+    input  wire             if_stop_cmd_i,
 
 // OTHERS
-    input  wire     [1:0] if_priv_mode_i,
-    input  wire    [31:0] reset_vector_i,
-    output wire           id_excp_inst_access_fault_o,
-    output wire    [31:0] id_inst_fault_addr_o,
-    output wire           if_excp_inst_address_misaligned_o,
-    output wire           init_pc_o
+    input  wire       [1:0] if_priv_mode_i,
+    input  wire      [31:0] reset_vector_i,
+
+// PMP ENTRY STATE
+    input  wire  [16*8-1:0] pmp_cfg_i,
+    input  wire [16*32-1:0] pmp_addr_i,
+    input  wire             pmp_mml_i,
+    input  wire             pmp_mmwp_i,
+
+    output wire             id_excp_inst_access_fault_o,
+    output wire      [31:0] id_inst_fault_addr_o,
+    output wire             if_excp_inst_address_misaligned_o,
+    output wire             init_pc_o
 
 );
 
 // USER PARAMETERs
 //=================================================================================================================
-parameter                 ARST_EN             = 1'b1;  // Reset style: 1=async (negedge hresetn_i), 0=sync (async term tied high -> sync-reset FF)
-parameter                 C_EXT_EN            = 1'b1;  // Compressed instructions enable
-parameter                 SINGLE_CYCLE_BRANCH = 1'b1;  // Taken-branch latency:
-                                                       //   0 = one-bubble taken branch  (highest Fmax, lower IPC)
-                                                       //   1 = zero-bubble taken branch (lower Fmax, highest IPC)
+parameter                   PMP_NR              = 0;     // Writable PMP entries: 0, 4, 8 or 16
+parameter                   ARST_EN             = 1'b1;  // Reset style: 1=async (negedge hresetn_i), 0=sync (async term tied high -> sync-reset FF)
+parameter                   C_EXT_EN            = 1'b1;  // Compressed instructions enable
+parameter                   SINGLE_CYCLE_BRANCH = 1'b1;  // Taken-branch latency:
+                                                         //   0 = one-bubble taken branch  (highest Fmax, lower IPC)
+                                                         //   1 = zero-bubble taken branch (lower Fmax, highest IPC)
 //=================================================================================================================
 
 
@@ -77,50 +85,56 @@ parameter                 SINGLE_CYCLE_BRANCH = 1'b1;  // Taken-branch latency:
 //////                                       INTERNAL WIRES/REGISTERS/PARAMETERS DECLARATION                                //////
 //////======================================================================================================================//////
 
-wire               [31:2] if_pc;
-wire               [29:0] if_pc_nxt_base;
-wire               [29:0] if_pc_nxt;
-wire               [31:0] id_pc_reg;
-wire                      fetch_freeze;
-wire                      fetch_freeze_ahb;
-wire                      id_ready;
-wire                      incr_pc;
-wire                      aph_ongoing;
-wire                      aph_valid;
-wire                      dph_last;
-wire                      dph_error_1st;
-wire                      dph_error;
-wire                      dph_ongoing_nxt;
-wire                      dph_ongoing;
-reg                 [5:0] inst_buf_valid_nxt;
-wire                [5:0] inst_buf_valid;
-reg                [95:0] inst_buf_nxt;
-wire               [95:0] inst_buf;
-wire                      ignore_incoming;
-wire                      buf_will_be_full;
-wire                      consume_inst;
-wire                      buffered_inst_incomplete;
-wire                      incoming_inst_incomplete;
+localparam                  PMP_NR_USE          = (PMP_NR >= 16) ? 16 :
+                                                  (PMP_NR >=  8) ?  8 :
+                                                  (PMP_NR >=  4) ?  4 : 0;
+
+wire                 [31:2] if_pc;
+wire                 [29:0] if_pc_nxt_base;
+wire                 [29:0] if_pc_nxt;
+wire                 [31:0] id_pc_reg;
+wire                        fetch_freeze;
+wire                        fetch_freeze_ahb;
+wire                        id_ready;
+wire                        incr_pc;
+wire                        aph_ongoing;
+wire                        pmp_fetch_fault_1st;
+wire                        pmp_fetch_fault;
+wire                        aph_valid;
+wire                        dph_last;
+wire                        dph_error_1st;
+wire                        dph_error;
+wire                        dph_ongoing_nxt;
+wire                        dph_ongoing;
+reg                   [5:0] inst_buf_valid_nxt;
+wire                  [5:0] inst_buf_valid;
+reg                  [95:0] inst_buf_nxt;
+wire                 [95:0] inst_buf;
+wire                        ignore_incoming;
+wire                        buf_will_be_full;
+wire                        consume_inst;
+wire                        buffered_inst_incomplete;
+wire                        incoming_inst_incomplete;
 
 // Speculative branch state
-wire                      branch_pending;                                                  // High for exactly 1 cycle after id_branch_detect_i
-wire               [31:0] branch_target_saved;                                             // Saved branch target address
-wire               [31:2] branch_if_pc_saved;                                              // Saved AHB fetch PC
-wire                      branch_target_fetched;                                           // Branch target address was accepted by AHB
+wire                        branch_pending;                                                // High for exactly 1 cycle after id_any_branch_detect
+wire                 [31:0] branch_target_saved;                                           // Saved branch target address
+wire                 [31:2] branch_if_pc_saved;                                            // Saved AHB fetch PC
+wire                        branch_target_fetched;                                         // Branch target address was accepted by AHB
 
-wire                      branch_confirmed       = branch_pending   & ~id_branch_cancel_i; // Branch pending and NOT cancelled (taken)
-wire                      branch_cancelled       = branch_pending   &  id_branch_cancel_i; // Branch pending and cancelled (not taken)
+wire                        branch_confirmed     = branch_pending   & ~id_branch_cancel_i; // Branch pending and NOT cancelled (taken)
+wire                        branch_cancelled     = branch_pending   &  id_branch_cancel_i; // Branch pending and cancelled (not taken)
 
 // id_slow_branch_i is asserted by the decoder ONLY for non-conditional slow redirects (trap, UOP table-jump, FENCE.I)
 // Regular conditional branches always take the fast path here.
-wire                      id_any_branch_detect   = id_slow_branch_i | id_branch_detect_i;
+wire                        id_any_branch_detect = id_slow_branch_i | id_branch_detect_i;
 
 // Buffer-only path: in SINGLE_CYCLE_BRANCH=0 the decoder reads instructions from the
 // registered inst_buf rather than bypassing inst_hrdata, breaking the
 // inst_hrdata -> id_branch_target -> inst_haddr combinational loop. Costs one bubble
 // on a taken branch (the buffer must refill from the branch target) in exchange for
 // the higher Fmax achievable with the loop broken.
-wire                      eff_buf_only           = ~SINGLE_CYCLE_BRANCH;
+wire                        eff_buf_only         = ~SINGLE_CYCLE_BRANCH;
 
 
 //////======================================================================================================================//////
@@ -144,25 +158,28 @@ wire incoming_lower_is_compressed = C_EXT_EN & (inst_hrdata_i[1:0]   != 2'b11) &
 wire incoming_upper_is_compressed = C_EXT_EN & (inst_hrdata_i[17:16] != 2'b11) &  id_pc_o[1];
 wire buffered_is_compressed       = C_EXT_EN & (inst_buf[1:0]        != 2'b11);
 
-// Instruction access fault freeze: stop AHB after error until trap redirect
+// Instruction access fault freeze: stop AHB after error until a CONFIRMED redirect.
 //
-// The clear on id_any_branch_detect is deliberately BROAD (any branch detect,
-// including a SPECULATIVELY-taken conditional branch that is later cancelled),
-// not just a confirmed trap/branch redirect. This does NOT drop a real pending
-// fault, because the clear is self-healing:
-//   - speculative branch CONFIRMED (taken): the erroring fetch was the
-//     abandoned not-taken/sequential prefetch -> discarding the fault is the
-//     architecturally correct outcome (that path never executes).
-//   - speculative branch CANCELLED (mispredicted): execution resumes on the
-//     fall-through, which is the path that contained the erroring fetch. The
-//     erroring fetch buffered NOTHING (incoming_inst is gated ~dph_error), so
-//     the decoder cannot make forward progress without RE-FETCHing that address
+// SET:   dph_error (wrong-path-qualified at capture, see dph_error_1st). An error
+//        landing on the branch-detect cycle itself cannot be classified at capture;
+//        it is latched here and the clear below finishes the classification.
+// CLEAR: confirmed redirects only --
+//   - id_slow_branch_i : trap / UOP table-jump / FENCE.I. Never cancelled; clearing
+//     at detect keeps the trap-vector refetch bubble-free.
+//   - branch_confirmed : speculative fast branch, one cycle after detect. Execution
+//     leaves the faulting path, so the pending fault is architecturally dead.
+// A CANCELLED speculation must keep the freeze: if_pc has already advanced past the
+// erroring word X and X is never refetched -- holding the freeze lets the buffer
+// drain, id_pc_o parks at X, and the fault fires with the correct mepc/mtval = X.
 wire                      fetch_fault_freeze;
-// Priority: any-branch clears (self-healing) > AHB error sets > hold.
-wire fetch_fault_freeze_en  = id_any_branch_detect | dph_error;
-wire fetch_fault_freeze_nxt = id_any_branch_detect ? 1'b0 :              // Any branch clears (self-healing - see above)
-                              dph_error            ? 1'b1 :              // Freeze on AHB error
-                                                     fetch_fault_freeze;
+// Priority: clear > same-cycle set. A redirect is architecturally-later information;
+// this is how a detect-cycle error is discarded on confirm yet kept on cancel.
+wire fetch_fault_clear      = id_slow_branch_i | branch_confirmed;
+wire fetch_fault_freeze_en  = fetch_fault_clear | dph_error | pmp_fetch_fault;
+wire fetch_fault_freeze_nxt = fetch_fault_clear ? 1'b0 :                 // Confirmed redirect clears (see above)
+                             (dph_error |
+                              pmp_fetch_fault)  ? 1'b1 :                 // Freeze on (correct-path) AHB error or PMP denial
+                                                  fetch_fault_freeze;
 
 arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_fetch_fault_freeze (
                          .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(fetch_fault_freeze_en),
@@ -170,17 +187,80 @@ arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_fetch_fault_freeze (
                                                               .q_o (fetch_fault_freeze));
 
 // Combine all fetch freeze conditions
-// Stop AHB when: decoder not requesting, system stop, buffer full, or AHB error.
+// Stop AHB when: fetch_freeze (system/WFI stop), buffer about to fill, fetch-fault freeze, registered AHB error, or slow branch.
 // `dph_error` is REGISTERED -- it goes high on the AHB-Lite 2nd-ERROR cycle
 // (one cycle after `dph_error_1st`), which is exactly the cycle a trailing
 // sequential prefetch would otherwise commit at the HREADY=1 accept edge.
 // Gating fetch_freeze_ahb with the registered signal is what blocks that
 // would-be prefetch at the bus boundary.
+//
+// A discarded wrong-path error does not set dph_error, so an address phase may be
+// accepted during that error's 2nd (hready=1) cycle. That address is by construction
+// the post-redirect resume/target address (if_pc did not advance during the erroring
+// data phase), and presenting NONSEQ during an ERROR response's 2nd cycle is legal
+// AHB-Lite (IDLE there is recommended, not mandatory).
 // id_slow_branch_i suppresses the address phase in the detect cycle: the slow path
 // updates if_pc at the clock edge, so the AHB must not issue a fetch from the stale
 // if_pc (which could be an unmapped address at the end of ROM).
 assign fetch_freeze               = if_stop_cmd_i;
 assign fetch_freeze_ahb           = (fetch_freeze | buf_will_be_full | fetch_fault_freeze | dph_error | id_slow_branch_i);
+
+// PMP on the fetch address, checked DURING the transfer rather than before it.
+//
+// The fetch is issued unconditionally and the verdict is taken on the registered
+// address while the data phase runs, so the matcher never touches inst_haddr_o or
+// inst_htrans_o.
+// Privilege is the RAW mode at the time of the fetch, registered alongside the
+// address: MPRV retargets loads and stores only, never instruction fetch.
+// Built only when the configuration has entries. With none, the capture flops hold
+// an address nothing reads; leaving that for synthesis to prune is fragile and
+// shows up as unloaded-net lint.
+generate
+if (PMP_NR_USE != 0) begin : g_pmp_fetch
+
+    wire [29:0] dph_addr;
+    wire  [1:0] dph_priv;
+    wire        pmp_fetch_raw;
+
+    arv_dff #(.WIDTH(30), .ARST_EN(ARST_EN)) u_dph_addr (
+                        .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(aph_valid),
+                                        .d_i(inst_haddr_o[31:2]), .q_o(dph_addr));
+    arv_dff #(.WIDTH(2), .RST_VAL(2'b11), .ARST_EN(ARST_EN)) u_dph_priv (
+                        .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(aph_valid),
+                                        .d_i(if_priv_mode_i), .q_o(dph_priv));
+
+    arv_pmp_check #(.PMP_NR(PMP_NR)) arv_pmp_check_fetch_inst (
+                        .pmp_cfg_i      ( pmp_cfg_i          ),
+                        .pmp_addr_i     ( pmp_addr_i         ),
+                        .pmp_mml_i      ( pmp_mml_i          ),
+                        .pmp_mmwp_i     ( pmp_mmwp_i         ),
+                        .addr_i         ( {dph_addr, 2'b00}  ),
+                        .priv_i         ( dph_priv           ),
+                        .acc_read_i     ( 1'b0               ),
+                        .acc_write_i    ( 1'b0               ),
+                        .acc_exec_i     ( 1'b1               ),
+                        .fault_o        ( pmp_fetch_raw      ));
+
+    // A ONE-CYCLE event, not a level held across the data phase.
+    assign pmp_fetch_fault_1st    =  dph_last & pmp_fetch_raw                    &
+                                     ~ignore_incoming                            &
+                                    ~(branch_cancelled &  branch_target_fetched) &
+                                    ~(branch_confirmed & ~branch_target_fetched) ;
+
+    // Registered
+    arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_pmp_fetch_fault (
+                .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1),
+                                .d_i(pmp_fetch_fault_1st), .q_o(pmp_fetch_fault));
+
+end else begin : g_no_pmp_fetch
+
+    assign pmp_fetch_fault_1st    =  1'b0;
+    assign pmp_fetch_fault        =  1'b0;
+
+    wire   pmp_state_unused       = pmp_mml_i | pmp_mmwp_i | (|pmp_cfg_i) | (|pmp_addr_i);
+
+end
+endgenerate
 
 // AHB Interface: Address Phase (Instruction-Fetch stage in the CPU pipeline)
 assign aph_ongoing                = ~fetch_freeze_ahb & ~init_pc_o;              // Unless we freeze, just keep fetching
@@ -195,7 +275,23 @@ arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_dph_ongoing (
                   .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(dph_ongoing_nxt), .q_o(dph_ongoing));
 
 // AHB Interface: Error Detection is done during the first cycle so it can be registered to shorten timing path.
-assign dph_error_1st              = (dph_ongoing & inst_hresp_i  & ~inst_hready_i);
+//
+// Wrong-path qualification: latch an erroring data phase only if the fetch it
+// terminates may be on the correct execution path. The discard terms mirror those
+// of incoming_inst -- an error is discarded exactly when its data would have been:
+//   ~ignore_incoming                             : cancel/confirm happened while the
+//        wrong-path data phase was still wait-stated (holds until id_ready, which
+//        includes the error's 2nd cycle).
+//   ~(branch_cancelled &  branch_target_fetched) : in-flight fetch is the cancelled
+//        speculative TARGET.
+//   ~(branch_confirmed & ~branch_target_fetched) : in-flight fetch is the abandoned
+//        SEQUENTIAL prefetch.
+// An error on the branch-detect cycle itself is unclassifiable here and is latched;
+// the fetch_fault_freeze clear policy completes the classification.
+assign dph_error_1st              = (dph_ongoing & inst_hresp_i  & ~inst_hready_i)
+                                  &  ~ignore_incoming
+                                  & ~(branch_cancelled &  branch_target_fetched)
+                                  & ~(branch_confirmed & ~branch_target_fetched);
 arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_dph_error (
                 .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(dph_error_1st), .q_o(dph_error));
 
@@ -211,7 +307,7 @@ assign id_ready                   = (inst_hready_i & dph_ongoing);
 //////======================================================================================================================//////
 //////======================================================================================================================//////
 
-// Branch pending: high for exactly 1 cycle after id_branch_detect_i
+// Branch pending: high for exactly 1 cycle after id_any_branch_detect
 arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_branch_pending (
                      .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(id_any_branch_detect), .q_o(branch_pending));
 
@@ -266,6 +362,7 @@ arv_dff #(.WIDTH(30), .ARST_EN(ARST_EN)) u_if_pc (
 wire [1:0] id_branch_target_nxt_unused   = id_branch_target_nxt_i[1:0];
 wire       id_slow_branch_target_unused  = id_slow_branch_target_i[0];
 wire       id_branch_target_lsb_unused   = id_branch_target_i[0];
+wire [1:0] reset_vector_lsb_unused       = reset_vector_i[1:0];
 
 // This PC increments as instructions are consumed by the decoder
 // On confirm, effective_buf_valid forces AHB path
@@ -278,7 +375,7 @@ wire id_incr_by_4      = consume_inst & id_instruction_valid_o & ~id_next_inst_i
 // On confirm+consume: id_incr uses id_pc_o (= branch_target_saved), so id_pc_reg advances from target
 // On confirm without consume: branch_confirmed fallback sets id_pc_reg to target
 wire        id_pc_reg_en  = init_pc_o | id_incr_by_2 | id_incr_by_4 | branch_confirmed;
-wire [31:0] id_pc_reg_nxt = init_pc_o        ? reset_vector_i       :
+wire [31:0] id_pc_reg_nxt = init_pc_o        ? {reset_vector_i[31:2], 2'b00} :
                             id_incr_by_2     ? id_pc_o + 32'd2      :   // Compressed instruction: 16 bits
                             id_incr_by_4     ? id_pc_o + 32'd4      :   // Standard instruction: 32 bits
                             branch_confirmed ? branch_target_saved  :   // Confirm without consumption
@@ -306,9 +403,10 @@ assign   inst_haddr_o           =  id_branch_detect_i ? {id_branch_target_i[31:2
                                    branch_cancelled   ? {branch_if_pc_saved,       2'b00} :
                                                         {if_pc,                    2'b00} ;
 
-assign   inst_htrans_o          =  2'b10 & {2{aph_ongoing}};                  // NONSEQ
+// NONSEQ only on cycles the transfer is actually accepted; IDLE whenever inst_hready_i is low.
+assign   inst_htrans_o          =  2'b10 & {2{aph_valid}};                    // NONSEQ
 
-// Static signals on the instruciton bus
+// Static signals on the instruction bus
 assign   inst_hburst_o          =  3'b000;                                    // Single transfer burst
 assign   inst_hmastlock_o       =  1'b0;                                      // Unlocked sequence
 assign   inst_hprot_o           = {1'b0, 1'b0, |if_priv_mode_i, 1'b0};        // {Non-cacheable; Non-bufferable; Privileged/User access; Opcode-Fetch}
@@ -325,29 +423,6 @@ assign   inst_hwdata_o          = 32'h00000000;
 //////                                                                                                                      //////
 //////======================================================================================================================//////
 //////======================================================================================================================//////
-//
-//
-//                             Clk0        Clk1           Clk2          Clk3          Clk4          Clk5          Clk6          Clk7          Clk8
-//                        |           |             |             |             |             |             |             |             |             |
-//  hclk_i                  ───┐      ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐
-//                             └──────┘      └──────┘      └──────┘      └──────┘      └──────┘      └──────┘      └──────┘      └──────┘      └──────
-//
-//  id_pc_o[31:0]                  2000003C         |   20000040  |   20000044  |                       20000048                        |   2000004C
-//                          ────────────────────────|─────────────|─────────────|───────────────────────────────────────────────────────|─────────────
-//
-//  id_instruction_request_i          ┌─────────────────────────────────────────┐                     = 0                 ┌───────────────────────────
-//                           ─────────┘                   = 1                   └─────────────────────────────────────────┘
-//
-//  id_instruction_valid_o  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-//                                                                                   = 1
-//
-//  id_instruction_o[31:0]         006F0F33         |   006C0E93  |   03DF0F33  |                       002F1F13                        |   01E48F33
-//                          ────────────────────────|─────────────|─────────────|───────────────────────────────────────────────────────|─────────────
-//
-//                        |           |             |             |             |             |             |             |             |             |
-//                             Clk0        Clk1           Clk2          Clk3          Clk4          Clk5          Clk6          Clk7          Clk8
-//
-//
 //--------------------------------------------------------------------------------------------------------------
 //
 // This 96-bit (six-halfword) shift register handles compressed (16-bit) and standard (32-bit) instruction alignment.
@@ -381,7 +456,16 @@ assign consume_inst  = eff_buf_only ? (id_instruction_request_i & id_instruction
 // New instruction incoming from AHB:
 //  - On cancel cycle: block branch target data (arrived from speculative fetch)
 //  - On confirm cycle: block sequential data (stale, buffer will be flushed)
-wire   incoming_inst = id_ready & ~ignore_incoming & ~dph_error & ~fetch_fault_freeze
+//  - On a confirmed redirect: the freeze clear takes effect at the clock edge, so a
+//    freeze being discarded is still visible during the confirm cycle. The data
+//    arriving in that cycle is the redirect target's, not the faulting path's, and
+//    dropping it would leave the buffer one parcel ahead of id_pc_o. Only
+//    branch_confirmed qualifies -- it flushes the buffer at the same edge, so the
+//    parcel admitted here cannot be a stale post-fault one. id_slow_branch_i is
+//    deliberately excluded, as it is for fault_pending: the trap redirect servicing
+//    a real fault is itself a slow branch, and the freeze must hold across it.
+wire   incoming_inst = id_ready & ~ignore_incoming & ~dph_error & ~pmp_fetch_fault_1st
+                     & ~((pmp_fetch_fault | fetch_fault_freeze) & ~branch_confirmed)
                      & ~(branch_cancelled &  branch_target_fetched)
                      & ~(branch_confirmed & ~branch_target_fetched);
 
@@ -402,8 +486,10 @@ always @(*) begin
                 inst_buf_nxt       = {64'h0000000000000000, inst_hrdata_i};              // Save NEW[31:0] to BUF_NXT[31:0]
             end
             else if (incoming_inst & ~consume_inst & ~incoming_inst_incomplete &  incoming_upper_is_compressed) begin
-                // Bypass mode (SINGLE_CYCLE_BRANCH=1) or PC[1]=1: lower HW already bypassed to decoder or below current PC -- save upper only
-                // Buffer-only mode (SINGLE_CYCLE_BRANCH=0) & PC[1]=0: no bypass, lower HW is the current instruction -- save both
+                // Guard invariant: incoming_upper_is_compressed contains id_pc_o[1], so id_pc_o[1]==1
+                // throughout this arm and the mux select (~eff_buf_only | id_pc_o[1]) is constant-true:
+                // the lower HW sits below the current PC and only the upper HW is saved. The save-both
+                // second leg is structurally unreachable.
                 inst_buf_valid_nxt = (~eff_buf_only | id_pc_o[1]) ? 6'b000001                                        : 6'b000011;
                 inst_buf_nxt       = (~eff_buf_only | id_pc_o[1]) ? {80'h00000000000000000000, inst_hrdata_i[31:16]} : {64'h0000000000000000, inst_hrdata_i};
             end
@@ -549,11 +635,11 @@ always @(*) begin
         // STATE 011111: Five halfwords (80 bits) at [79:0]
         //----------------------------------------------------------------------------------------------
         6'b011111: begin
-            if (incoming_inst & consume_inst & ~buffered_is_compressed) begin
+            if (incoming_inst & consume_inst & ~buffered_is_compressed) begin           // Unreachable: buf_will_be_full stops the fetch before 5 HW
                 inst_buf_valid_nxt = 6'b011111;                                         // Consume BUF[31:0], add NEW
                 inst_buf_nxt       = {16'h0000, inst_hrdata_i, inst_buf[79:32]};        // Shift 32, Save NEW[31:0] to BUF_NXT[79:48]
             end
-            else if (incoming_inst & consume_inst & buffered_is_compressed) begin
+            else if (incoming_inst & consume_inst & buffered_is_compressed) begin       // Unreachable: buf_will_be_full stops the fetch before 5 HW
                 inst_buf_valid_nxt = 6'b111111;                                         // Consume BUF[15:0], add NEW
                 inst_buf_nxt       = {inst_hrdata_i, inst_buf[79:16]};                  // Shift 16, Save NEW[31:0] to BUF_NXT[95:64]
             end
@@ -575,11 +661,11 @@ always @(*) begin
         // STATE 111111: Full buffer -- six halfwords (96 bits) at [95:0]
         //----------------------------------------------------------------------------------------------
         6'b111111: begin
-            if (incoming_inst & consume_inst & ~buffered_is_compressed) begin
+            if (incoming_inst & consume_inst & ~buffered_is_compressed) begin           // Unreachable: buf_will_be_full stops the fetch before 6 HW
                 inst_buf_valid_nxt = 6'b111111;                                         // Consume BUF[31:0], absorb incoming
                 inst_buf_nxt       = {inst_hrdata_i, inst_buf[95:32]};                  // Shift 32, load incoming
             end
-            else if (incoming_inst & consume_inst & buffered_is_compressed) begin
+            else if (incoming_inst & consume_inst & buffered_is_compressed) begin       // Unreachable: buf_will_be_full stops the fetch before 6 HW
                 inst_buf_valid_nxt = 6'b011111;                                         // Consume BUF[15:0], drop incoming (buffer still has 5 slots)
                 inst_buf_nxt       = {16'h0000, inst_buf[95:16]};                       // Shift 16, drop incoming (would overflow)
             end
@@ -598,11 +684,21 @@ always @(*) begin
         end
 
         //----------------------------------------------------------------------------------------------
-        // Other states (shouldn't occur)
+        // Illegal (non-thermometer) states: SEU recovery
         //----------------------------------------------------------------------------------------------
+        // Every legal thermometer code (000000/000001/000011/000111/001111/011111/111111) has an
+        // explicit arm above, so this default is reachable ONLY through a corrupted inst_buf_valid
+        // encoding (e.g. a soft-error bit flip). Recovery: drop the buffer (valid + data) instead
+        // of holding the illegal code, which the decoder can never legally consume out of. Once a
+        // valid bit is corrupted the true buffered-halfword count is unknowable, so dropping is
+        // the only locally consistent action. The FSM re-enters the legal state space through the
+        // EMPTY arm on the next cycle, and id_pc_reg stays authoritative throughout (it advances
+        // only on real consumption and is untouched by this drop), so the next confirmed redirect
+        // (taken branch / trap) flushes and refetches from its target exactly as after any normal
+        // branch_confirmed flush, fully resynchronizing the fetch stream with id_pc_reg.
         default: begin
-            inst_buf_valid_nxt = inst_buf_valid;
-            inst_buf_nxt       = inst_buf;
+            inst_buf_valid_nxt = 6'b000000;
+            inst_buf_nxt       = 96'h000000000000000000000000;
         end
     endcase
 end
@@ -707,9 +803,17 @@ assign   if_excp_inst_address_misaligned_o = (C_EXT_EN ? id_pc_o[0] : (id_pc_o[1
 // CM.JT / CM.JALT is an UNCONDITIONAL UOP-final branch whose own branch
 // resolves only after its multi-cycle micro-op sequence (e.g. the POPRET
 // stack pop) completes, several cycles after dispatch.
-wire     fault_pending                     =  dph_error | fetch_fault_freeze;
+//
+// ~branch_confirmed: the freeze clear on a confirmed redirect takes effect at the
+// clock edge, so the stale freeze is still visible in fault_pending DURING the
+// confirm cycle -- the same cycle ex_uop_has_branch_i releases and id_pc_o already
+// muxes to the redirect target. Masking is safe: a fault still pending on a confirm
+// cycle is being discarded at that edge anyway. id_slow_branch_i is deliberately NOT
+// masked: the trap redirect servicing a real fault is a slow branch, and decode may
+// still be sampling the fault during trap entry.
+wire     fault_pending                     =  dph_error | pmp_fetch_fault | fetch_fault_freeze;
 wire     fetch_buf_drained                 = (inst_buf_valid == 6'b000000);
-assign   id_excp_inst_access_fault_o       =  fault_pending & (fetch_buf_drained | buffered_inst_incomplete) & ~ex_uop_has_branch_i;
+assign   id_excp_inst_access_fault_o       =  fault_pending & (fetch_buf_drained | buffered_inst_incomplete) & ~ex_uop_has_branch_i & ~branch_confirmed;
 
 // Faulting-fetch byte address for mtval (RISC-V Priv. spec 3.1.16):
 //   "the virtual address of the portion of the instruction that caused the fault".

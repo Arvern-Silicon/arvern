@@ -9,8 +9,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Full license text is available in the LICENSE file at the repository root.
 #----------------------------------------------------------------------------
-# Description: ACCEPTED-DEVIATION LOCK
-#   NMI PREEMPTS AN IN-FLIGHT POSTED STORE -> FAULT DROPPED
+# Description: NMI PREEMPTS AN IN-FLIGHT POSTED STORE -> FAULT STILL REPORTED
+#   The store's bus error sets the sticky nmi_bus_pending, so it is delivered
+#   as a second RNMI after the pin one (mncause 2 then 3). The store itself is
+#   posted: mnepc resumes strictly past it and it is not replayed.
 #----------------------------------------------------------------------------
 
 .section .text
@@ -23,9 +25,8 @@ main:
     # NMI HANDLER (Smrnmi)
     # Entered when nmi_i asserts and NMIE=1. On entry hardware clears
     # NMIE and saves the resume PC to mnepc. We read mnepc, store it to
-    # the scratchpad, then MNRET. Under the accepted deviation the
-    # preempted store is treated as posted/committed, so mnepc resumes
-    # strictly PAST the store and it is NOT replayed.
+    # the scratchpad, then MNRET. The preempted store is posted/committed,
+    # so mnepc resumes strictly PAST the store and it is NOT replayed.
     #=================================================================
     .align 2
 
@@ -42,6 +43,14 @@ nmi_handler:
     # Capture mnepc -- under the deviation this resumes PAST the store
     csrr t1, 0x741              # mnepc = 0x741
     sw   t1, 0x10(s1)
+
+    # mncause of THIS delivery -> 0x20 + 4*(index): 2 = pin, 3 = data-bus error
+    csrr t1, 0x742
+    lw   t0, 0x00(s1)
+    addi t0, t0, -1
+    slli t0, t0, 2
+    add  t0, t0, s1
+    sw   t1, 0x20(t0)
 
     lw   t1,  0(sp)
     lw   t0,  4(sp)
@@ -105,9 +114,11 @@ _start:
     sw   t0, 0x10(s1)           # mnepc_in_nmi
     sw   t0, 0x14(s1)           # mcause_in_trap
     sw   t0, 0x18(s1)           # mepc_in_trap
+    sw   t0, 0x1C(s1)           # tb_arm_release (testbench writes 1 when armed)
 
     # Publish NMI handler address for the testbench
     la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
     sw   t0, 0x08(s1)
 
     # Publish the faulting-store PC for the testbench (used to time NMI
@@ -132,12 +143,18 @@ _start:
 
     #=================================================================
     # Pre-store sync point. The testbench latches nmi_vector on this
-    # marker, then waits for probes_cpu.pc == store_fault to assert NMI
-    # on the precise cycle the faulting store reaches decode.
+    # marker, arms its PC watch, then releases us by writing 0x1C.
     #
-    # NOTE: this `li x31,...` is the LAST instruction before the store.
+    # The release handshake is what makes the timing deterministic: the
+    # store must not issue until the testbench is armed, and there is no
+    # instruction budget between the marker and the store to absorb the
+    # testbench being scheduled a cycle later. Polling here costs nothing
+    # -- the loop exits with the store already in the pipeline.
     #=================================================================
     li   x31, 0x11111111
+
+1:  lw   t4, 0x1C(s1)           # wait for the testbench to arm
+    beqz t4, 1b
 
 store_fault:
     sw   t3, 0(t2)              # store to address 0. NMI preempts it

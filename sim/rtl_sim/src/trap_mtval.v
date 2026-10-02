@@ -14,8 +14,6 @@
 //   - Illegal instruction    (MCAUSE=2,  MTVAL=0)
 //   - Load addr misaligned   (MCAUSE=4,  MTVAL=faulting address)
 //   - Store addr misaligned  (MCAUSE=6,  MTVAL=faulting address)
-//   - Load access fault      (MCAUSE=5,  MTVAL=faulting address)
-//   - Store access fault     (MCAUSE=7,  MTVAL=faulting address)
 //   - EBREAK                 (MCAUSE=3,  MTVAL=0)
 //   - ECALL from M-mode      (MCAUSE=11, MTVAL=0)
 //
@@ -32,7 +30,7 @@ integer allow_peripheral_accesses;
 
 // Scratchpad word address offset (byte address / 4)
 // SRAM base is 0x80000000, word-addressed starting at 0
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 initial
    begin
@@ -163,40 +161,18 @@ initial
 
 
       //=================================================================
-      // PHASE 5: Load access fault (MCAUSE=5, MTVAL=0x10000000)
+      // PHASES 5 & 6 (load / store ACCESS FAULT) REMOVED -- see the .s.
+      // Bus errors are RNMIs and write marv_eaddr, not mtval; covered by
+      // trap_nmi_bus_error. mcause 5/7 are RESERVED.
+      //=================================================================
+
+      //=================================================================
+      // PHASE 5: EBREAK (MCAUSE=3, MTVAL=0)
       //=================================================================
       $display("");
       $display("");
       $display(" ====================================================================");
-      $display("|                 PHASE 5: LOAD ACCESS FAULT                         |");
-      $display(" ====================================================================");
-      $display("");
-      $display("Waiting for the firmware...");
-
-      @(probes_cpu.x31==32'h55555555);
-      repeat(3) @(posedge free_clk);
-
-      // Check trap_count = 4
-      check_mem_value(`SPAD(32'h00), 32'h00000004);
-
-      // Check MCAUSE = 5
-      $display("");
-      $display("--- MCAUSE verification (load access fault) ---");
-      check_mem_value(`SPAD(32'h50), 32'h00000005);
-
-      // Check MTVAL = 0x10000000 (faulting unmapped address)
-      $display("");
-      $display("--- MTVAL verification (expect faulting address 0x10000000) ---");
-      check_mem_value(`SPAD(32'h54), 32'h10000000);
-
-
-      //=================================================================
-      // PHASE 6: Store access fault (MCAUSE=7, MTVAL=0x10000004)
-      //=================================================================
-      $display("");
-      $display("");
-      $display(" ====================================================================");
-      $display("|                 PHASE 6: STORE ACCESS FAULT                        |");
+      $display("|                 PHASE 5: EBREAK                                    |");
       $display(" ====================================================================");
       $display("");
       $display("Waiting for the firmware...");
@@ -204,36 +180,8 @@ initial
       @(probes_cpu.x31==32'h66666666);
       repeat(3) @(posedge free_clk);
 
-      // Check trap_count = 5
-      check_mem_value(`SPAD(32'h00), 32'h00000005);
-
-      // Check MCAUSE = 7
-      $display("");
-      $display("--- MCAUSE verification (store access fault) ---");
-      check_mem_value(`SPAD(32'h60), 32'h00000007);
-
-      // Check MTVAL = 0x10000004 (faulting unmapped address)
-      $display("");
-      $display("--- MTVAL verification (expect faulting address 0x10000004) ---");
-      check_mem_value(`SPAD(32'h64), 32'h10000004);
-
-
-      //=================================================================
-      // PHASE 7: EBREAK (MCAUSE=3, MTVAL=0)
-      //=================================================================
-      $display("");
-      $display("");
-      $display(" ====================================================================");
-      $display("|                 PHASE 7: EBREAK                                    |");
-      $display(" ====================================================================");
-      $display("");
-      $display("Waiting for the firmware...");
-
-      @(probes_cpu.x31==32'h77777777);
-      repeat(3) @(posedge free_clk);
-
       // Check trap_count = 6
-      check_mem_value(`SPAD(32'h00), 32'h00000006);
+      check_mem_value(`SPAD(32'h00), 32'h00000004);
 
       // Check MCAUSE = 3
       $display("");
@@ -247,21 +195,21 @@ initial
 
 
       //=================================================================
-      // PHASE 8: ECALL from M-mode (MCAUSE=11, MTVAL=0)
+      // PHASE 6: ECALL from M-mode (MCAUSE=11, MTVAL=0)
       //=================================================================
       $display("");
       $display("");
       $display(" ====================================================================");
-      $display("|                 PHASE 8: ECALL FROM M-MODE                         |");
+      $display("|                 PHASE 6: ECALL FROM M-MODE                         |");
       $display(" ====================================================================");
       $display("");
       $display("Waiting for the firmware...");
 
-      @(probes_cpu.x31==32'h88888888);
+      @(probes_cpu.x31==32'h77777777);
       repeat(3) @(posedge free_clk);
 
       // Check trap_count = 7
-      check_mem_value(`SPAD(32'h00), 32'h00000007);
+      check_mem_value(`SPAD(32'h00), 32'h00000005);
 
       // Check MCAUSE = 11 (0x0B)
       $display("");

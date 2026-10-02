@@ -10,9 +10,11 @@
 # Full license text is available in the LICENSE file at the repository root.
 #----------------------------------------------------------------------------
 # Description: mstatus SUM/MXR/TVM WARL CONFORMANCE
-#   With S-mode advertised in misa, mstatus bits 18 (SUM), 19 (MXR), 20 (TVM)
-#   must be WARL writable per RISC-V Privileged spec. SUM and MXR are also
-#   visible in sstatus.
+#   With S-mode advertised in misa, mstatus bits 19 (MXR) and 20 (TVM) must be
+#   WARL writable per RISC-V Privileged spec. Bit 18 (SUM) must NOT be: the spec
+#   makes it read-only 0 if S-mode is not supported OR if satp.MODE is read-only
+#   zero, and aRVern satp is a RAZ/WI Bare-only stub, so the second clause bites.
+#   MXR and SUM are also visible in sstatus.
 #
 #   This CPU implements S/U-mode but has no paged virtual memory, so the bits
 #   have no functional effect — they exist purely for software contract
@@ -30,9 +32,9 @@
 #=========================================================================
 # Scratchpad layout (SRAM base 0x80000000)
 #
-# Phase 2: SUM=1 via mstatus
-#   0x20: mstatus after  (bit 18 must be 1)
-#   0x24: sstatus after  (bit 18 must be 1)
+# Phase 2: attempt SUM=1 via mstatus (must not stick)
+#   0x20: mstatus after  (bit 18 must stay 0 -- SUM is hardwired)
+#   0x24: sstatus after  (bit 18 must stay 0)
 #
 # Phase 3: MXR=1 via sstatus
 #   0x30: sstatus after  (bit 19 must be 1)
@@ -45,6 +47,10 @@
 # Phase 5: clear all via mstatus
 #   0x50: mstatus after  (bits 20:18 must be 0)
 #   0x54: sstatus after  (bits 19:18 must be 0)
+#
+# PHASE 6: MPP WARL -- reserved encoding 2'b10
+#   0x60: mstatus after setting MPP=2'b11   (MPP must read 2'b11)
+#   0x64: mstatus after writing MPP=2'b10   (MPP must WARL to 2'b00)
 #=========================================================================
 
 # mstatus bit masks:
@@ -83,6 +89,9 @@ _start:
     #=================================================================
 
     li   t0, 0x40000
+    # Smdbltrp: MDT resets to 1 and blocks MIE from being set, so clear it first.
+    csrw mstatush, x0
+
     csrs mstatus, t0           # set mstatus.SUM
     csrr t0, mstatus
     sw   t0, 0x20(s1)
@@ -146,6 +155,33 @@ _start:
     csrr t1, sstatus
     sw   t1, 0x54(s1)
     lw   t2, 0x54(s1)
+
+    li   x31, 0x55555555
+
+    #=================================================================
+    # PHASE 6: MPP WARL. 2'b10 is RESERVED (it would select H-mode,
+    # which aRVern does not implement), so a write of it must land on
+    # some supported value. aRVern picks U (2'b00), matching sail-riscv
+    # -- riscv-arch-test Sm_mcsr-00's cp_mcsrwalk compares against that
+    # choice, so it is a deliberate alignment and not free to change.
+    #=================================================================
+
+    # Start from MPP = M (2'b11) so the reserved write is a real change.
+    li   t0, 0x1800
+    csrs mstatus, t0
+    csrr t0, mstatus
+    sw   t0, 0x60(s1)               # MPP must read back 2'b11
+
+    # Write the reserved encoding 2'b10: set bit 12, clear bit 11.
+    csrr t0, mstatus
+    li   t1, ~0x1800
+    and  t0, t0, t1                 # clear MPP
+    li   t1, 0x1000                 # MPP = 2'b10 (reserved)
+    or   t0, t0, t1
+    csrw mstatus, t0
+    csrr t0, mstatus
+    sw   t0, 0x64(s1)               # MPP must have WARL'd to 2'b00
+    lw   t2, 0x64(s1)
 
     li   x31, 0xdeadbeef
 

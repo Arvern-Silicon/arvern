@@ -7,16 +7,19 @@ CLAUDE.md
 build
 fusesoc.conf
 doc/private/*
-
+doc/*review*
 
 sim/rtl_sim/run/simv.daidir
 sim/rtl_sim/run/csrc
 sim/rtl_sim/run/log
+sim/rtl_sim/run/cov
+sim/rtl_sim/run/cov_archive
 sim/rtl_sim/run/stats
 sim/rtl_sim/run/simv
 sim/rtl_sim/run/simv_fetch
 sim/rtl_sim/run/stimulus.v
 sim/rtl_sim/run/asphalt*.log
+sim/rtl_sim/run/pitstop*.log
 sim/rtl_sim/run/benchmark_traces
 sim/rtl_sim/run/tb_arvern.vcd
 sim/rtl_sim/run/*.gtkw
@@ -25,10 +28,12 @@ sim/rtl_sim/run/probes_variables.v
 sim/rtl_sim/run/checker_data.mem
 sim/rtl_sim/run/obj_dir
 sim/rtl_sim/run/march_config.sh
+sim/rtl_sim/run/firmware_config.inc
 sim/rtl_sim/run/arv_parameterization.v
 sim/rtl_sim/run/WORK
 sim/rtl_sim/run/submit_sim.f
 sim/rtl_sim/run/submit_lint.f
+sim/rtl_sim/bin/submit_lint.f
 
 sim/rtl_sim/src-c/*/*.elf
 sim/rtl_sim/src-c/*/*.ihex
@@ -45,11 +50,21 @@ sim/rtl_sim/src-c/tmp
 sim/rtl_sim/src-c/embench-iot/bd
 sim/rtl_sim/src-c/embench-iot/logs
 
+sim/arch_test/run/riscv-arch-test/
+sim/arch_test/run/GENERATED/
+sim/arch_test/run/WORK/
+sim/arch_test/run/simv
+sim/arch_test/run/*.log
+sim/arch_test/run/*.vcd
+sim/arch_test/run/submit_sim.f
+sim/arch_test/run/arv_parameterization.v
+sim/arch_test/run/stimulus.v
+
 rtl/verilog/*.org.v
 
 synthesis/synopsys/alib-52
 synthesis/synopsys/results
-synthesis/synopsys/results_sweep
+synthesis/synopsys/results_*
 synthesis/synopsys/libraries/setup_t*
 synthesis/synopsys/libraries/setup_lib_default*
 synthesis/synopsys/libraries/t*
@@ -60,4 +75,15 @@ synthesis/synopsys/filenames.log
 synthesis/synopsys/rtl_params.tcl
 synthesis/synopsys/submit_syn.tcl
 synthesis/synopsys/clog*
+synthesis/synopsys/_par
+synthesis/_par_job*
 synthesis/synopsys/default.svf
+
+lint/vc_static/results
+lint/vc_static/*_d
+lint/vc_static/results_sweep
+
+formal/*
+
+# Temporary work-tracking notes, removed once the work lands
+WIP_*

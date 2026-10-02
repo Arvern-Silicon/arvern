@@ -18,114 +18,140 @@
 module  arv_load_store (
 
 // AHB CLOCK & RESET
-    input  wire           hclk_i,
-    input  wire           hresetn_i,
+    input  wire             hclk_i,
+    input  wire             hresetn_i,
 
 // DATA AHB BUS
-    input  wire    [31:0] data_hrdata_i,
-    input  wire           data_hready_i,
-    input  wire           data_hresp_i,
+    input  wire      [31:0] data_hrdata_i,
+    input  wire             data_hready_i,
+    input  wire             data_hresp_i,
 
-    output wire    [31:0] data_haddr_o,
-    output wire     [2:0] data_hburst_o,
-    output wire           data_hmastlock_o,
-    output wire     [3:0] data_hprot_o,
-    output wire     [2:0] data_hsize_o,
-    output wire           data_hsmode_o,
-    output wire     [1:0] data_htrans_o,
-    output wire    [31:0] data_hwdata_o,
-    output wire           data_hwrite_o,
+    output wire      [31:0] data_haddr_o,
+    output wire       [2:0] data_hburst_o,
+    output wire             data_hmastlock_o,
+    output wire       [3:0] data_hprot_o,
+    output wire       [2:0] data_hsize_o,
+    output wire             data_hsmode_o,
+    output wire       [1:0] data_htrans_o,
+    output wire      [31:0] data_hwdata_o,
+    output wire             data_hwrite_o,
 
 // OPERANDS (FROM REGISTER AND DECODER)
-    input  wire    [31:0] ex_ldst_reg_addr_i,
-    input  wire     [4:0] ex_ldst_reg_addr_sel_i,
-    input  wire    [31:0] ex_store_reg_wdata_i,
-    input  wire     [4:0] ex_store_reg_wdata_sel_i,
-    input  wire    [31:0] ex_ldst_op_immediate_i,
+    input  wire      [31:0] ex_ldst_reg_addr_i,
+    input  wire       [4:0] ex_ldst_reg_addr_sel_i,
+    input  wire      [31:0] ex_store_reg_wdata_i,
+    input  wire       [4:0] ex_store_reg_wdata_sel_i,
+    input  wire      [31:0] ex_ldst_op_immediate_i,
 
 // REGISTER WRITE DATA
-    output wire           wb_load_busy_o,
-    output wire           wb_load_reg_dest_wr_o,
-    output wire    [31:0] wb_load_reg_dest_wdata_o,
-    output wire     [4:0] wb_reg_dest_sel_o,
+    output wire             wb_load_busy_o,
+    output wire             wb_load_reg_dest_wr_o,
+    output wire      [31:0] wb_load_reg_dest_wdata_o,
+    output wire       [4:0] wb_reg_dest_sel_o,
 
 // INTERFACE TO DECODER
-    input  wire     [4:0] ex_dec_ldst_control_i,
-    input  wire     [1:0] priv_mode_ldst_i,
-    input  wire     [4:0] ex_reg_dest_sel_i,
-    input  wire     [4:0] ex_reg_dest_sel_mux_i,
-    output wire           ex_ldst_ready_o,
-    output wire           wb_ldst_ready_o,
+    input  wire       [4:0] ex_dec_ldst_control_i,
+    input  wire       [1:0] priv_mode_ldst_i,
+    input  wire       [1:0] priv_mode_jt_i,
+    input  wire       [4:0] ex_reg_dest_sel_i,
+    input  wire       [4:0] ex_reg_dest_sel_mux_i,
+    output wire             ex_ldst_ready_o,
+    output wire             ex_ldst_ready_fetch_o,
+    output wire             ex_ldst_unresolved_o,
+    output wire             wb_ldst_ready_o,
 
 // INTERFACE TO UOP SEQUENCER
-    output wire           wb_dph_ongoing_o,
-    input  wire           ex_uop_enable_i,
-    input  wire     [4:0] ex_uop_ldst_control_i,
-    input  wire    [31:0] ex_uop_ldst_immediate_i,
-    input  wire     [4:0] ex_uop_ld_dest_sel_i,
-    input  wire    [31:0] ex_uop_jt_base_i,
+    output wire             wb_dph_ongoing_o,
+    input  wire             ex_uop_enable_i,
+    input  wire             ex_uop_ready_i,
+    input  wire             ex_uop_jt_active_i,
+    input  wire       [4:0] ex_uop_ldst_control_i,
+    input  wire      [31:0] ex_uop_ldst_immediate_i,
+    input  wire       [4:0] ex_uop_ld_dest_sel_i,
+    input  wire      [31:0] ex_uop_jt_base_i,
+
+// PMP ENTRY STATE
+    input  wire  [16*8-1:0] pmp_cfg_i,
+    input  wire [16*32-1:0] pmp_addr_i,
+    input  wire             pmp_mml_i,
+    input  wire             pmp_mmwp_i,
 
 // ERROR DETECTION
-    output wire           ex_excp_load_address_misaligned_o,
-    output wire           ex_excp_store_address_misaligned_o,
-    output wire           wb_excp_load_access_fault_o,
-    output wire           wb_excp_store_access_fault_o,
+    output wire             ex_excp_load_address_misaligned_o,
+    output wire             ex_excp_store_address_misaligned_o,
+    output wire             ex_excp_load_access_fault_o,
+    output wire             ex_excp_store_access_fault_o,
+    output wire             wb_bus_error_load_o,
+    output wire             wb_bus_error_store_o,
+
+// SDTRIG LOAD/STORE DATA-ADDRESS WATCHPOINT
+    output wire             ex_is_load_o,
+    output wire             ex_is_store_o,
+    input  wire             trig_ls_fire_i,
 
 // WAW HAZARD DETECTION
-    input  wire           ex_alu_reg_dest_wr_i,
-    input  wire           ex_csr_reg_dest_wr_i,
+    input  wire             ex_alu_reg_dest_wr_i,
+    input  wire             ex_csr_reg_dest_wr_i,
 
 // PC PIPELINE FOR MEPC SAVE
-    input  wire    [31:0] ex_pc_i,
-    output wire    [31:0] wb_pc_o,
+    input  wire      [31:0] ex_pc_i,
+    output wire      [31:0] wb_pc_o,
 
 // DATA ADDRESS PIPELINE FOR MTVAL SAVE
-    output wire    [31:0] wb_data_addr_o
+    output wire      [31:0] wb_data_addr_o,
+    output wire             wb_uop_sourced_o,
+    output wire             wb_uop_seq_alive_o,
+    output wire             wb_uop_jt_sourced_o
 
 );
 
 // USER PARAMETERs
 //========================================
-parameter                 ARST_EN = 1'b1;
+parameter                   ARST_EN = 1'b1;
+parameter                   PMP_NR  = 0;        // Writable PMP entries: 0, 4, 8 or 16
 
 
 //////======================================================================================================================//////
 //////                                       INTERNAL WIRES/REGISTERS/PARAMETERS DECLARATION                                //////
 //////======================================================================================================================//////
 
-wire                [4:0] ex_ldst_control;
-wire                      ex_is_store;
-wire                      ex_is_load_std;
-wire                      ex_is_load_uop;
-wire                      ex_is_load;
-wire                [2:0] ex_size;
-wire                      ex_load_type;
-wire                      aph_ongoing;
-wire                      aph_valid;
-wire                      aph_wait;
-wire                      dph_ongoing;
-wire                      dph_ongoing_nxt;
-wire                      dph_last;
-wire                      dph_wait;
-wire                      dph_valid;
-wire                      dph_error1st;
-wire                      dph_error;
-wire                [1:0] dph_size;
-wire                [1:0] dph_alsb;
-wire               [31:0] data_hwdata_nxt;
-wire                      hazard_store_rs2;
-wire                      hazard_ldst_rs1;
-wire               [31:0] ex_ldst_addr;
-wire               [31:0] ex_ldst_imm;
-wire               [31:0] ex_store_wdata;
-wire                      dph_is_load;
-wire                      dph_load_type;
-wire                [7:0] ldst_reg_dest_wbyte;
-wire               [15:0] ldst_reg_dest_whalf;
-wire                      ex_excp_address_misaligned;
-wire                      wb_excp_access_fault;
-wire                      waw_conflict_detected;
-wire                      waw_conflict;
+wire                  [4:0] ex_ldst_control;
+wire                        ex_is_store;
+wire                        ex_is_load_std;
+wire                        ex_is_load_uop;
+wire                        ex_is_load;
+wire                  [2:0] ex_size;
+wire                        ex_load_type;
+wire                        aph_ongoing;
+wire                        aph_ongoing_raw;
+wire                        aph_request;
+wire                        aph_valid;
+wire                        aph_wait;
+wire                        dph_ongoing;
+wire                        dph_ongoing_nxt;
+wire                        dph_last;
+wire                        dph_wait;
+wire                        dph_valid;
+wire                        dph_error1st;
+wire                        dph_error;
+wire                  [1:0] dph_size;
+wire                  [1:0] dph_alsb;
+wire                 [31:0] data_hwdata_nxt;
+wire                        hazard_store_rs2;
+wire                        hazard_ldst_rs1;
+wire                 [31:0] ex_ldst_addr;
+wire                 [31:0] ex_ldst_imm;
+wire                 [31:0] ex_store_wdata;
+wire                        dph_is_load;
+wire                        dph_load_type;
+wire                  [7:0] ldst_reg_dest_wbyte;
+wire                 [15:0] ldst_reg_dest_whalf;
+wire                        ex_excp_address_misaligned;
+wire                        ex_excp_pmp_fault;
+wire                        pmp_fault;
+wire                        wb_bus_error;
+wire                        waw_conflict_detected;
+wire                        waw_conflict;
 
 //////======================================================================================================================//////
 //////======================================================================================================================//////
@@ -149,9 +175,12 @@ assign ex_is_load_uop   =        ex_uop_ldst_control_i[1];
 assign ex_size          = {1'b0, ex_ldst_control[3:2]};
 assign ex_load_type     =        ex_ldst_control[4];
 
-// AHB Interface: Address Phase state
-assign aph_ongoing      = (ex_is_store | ex_is_load) & !ex_excp_address_misaligned & !hazard_ldst_rs1 & !dph_error;
-assign aph_wait         = (aph_ongoing & !data_hready_i);
+// AHB Interface: Address Phase state.
+// (Note: the PMP verdict gates the BUS REQUEST only, not the aph_wait stall path)
+assign aph_request      = (ex_is_store | ex_is_load) & !ex_excp_address_misaligned & !hazard_ldst_rs1 & !trig_ls_fire_i;
+assign aph_ongoing_raw  =  aph_request & !dph_error;                    // no new address phase in the 2nd cycle of an ERROR response
+assign aph_ongoing      =  aph_ongoing_raw & !ex_excp_pmp_fault;
+assign aph_wait         =  aph_request & (!data_hready_i | dph_error);  // the held-off access stalls instead of retiring
 assign aph_valid        = (aph_ongoing &  data_hready_i);
 
 // AHB Interface: Data Phase state
@@ -196,8 +225,8 @@ arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_data_hwdata (
 // Note: hazard_store_rs2 is suppressed when a WAW conflict was detected (waw_conflict), meaning a newer
 // EX-stage instruction already wrote to the same register. In that case, the register file already
 // has the correct (newer) value and the stale WB load result must NOT be forwarded.
-assign hazard_ldst_rs1          = (ex_is_store | ex_is_load) & (wb_reg_dest_sel_o != 0) & (ex_ldst_reg_addr_sel_i   == wb_reg_dest_sel_o) ;
-assign hazard_store_rs2         =  ex_is_store               & (wb_reg_dest_sel_o != 0) & (ex_store_reg_wdata_sel_i == wb_reg_dest_sel_o) & ~waw_conflict;
+assign hazard_ldst_rs1          = (ex_is_store | ex_is_load) & (wb_reg_dest_sel_o != 5'h00) & (ex_ldst_reg_addr_sel_i   == wb_reg_dest_sel_o) ;
+assign hazard_store_rs2         =  ex_is_store               & (wb_reg_dest_sel_o != 5'h00) & (ex_store_reg_wdata_sel_i == wb_reg_dest_sel_o) & ~waw_conflict;
 
 
 // Static signals on the data bus
@@ -248,15 +277,26 @@ arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_dph_load_type (
                     .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(aph_valid & ex_is_load), .d_i(ex_load_type),      .q_o(dph_load_type));
 
 // Business of load-store unit
-assign wb_load_busy_o   =  dph_is_load;
+assign wb_load_busy_o       =  dph_is_load;
 
 // Detect wait states during address (EX) and data (WB) phases
-assign ex_ldst_ready_o  = !aph_wait & !hazard_ldst_rs1;
-assign wb_ldst_ready_o  = !dph_wait;
-assign wb_dph_ongoing_o =  dph_ongoing;
+assign ex_ldst_ready_o      = !aph_wait & !hazard_ldst_rs1;
+
+// Fetch-facing ready: a load/store in EX waits on the bus even when a misalign or a
+// watchpoint suppresses it, so the address adder stays off decode's stall NORs. It
+// differs from ex_ldst_ready_o only in a suppression cycle that meets a wait state;
+// holding the ID slot there is harmless, since the suppressed access traps, enters
+// Debug Mode or aborts its UOP sequence.
+assign ex_ldst_ready_fetch_o = !((ex_is_store | ex_is_load) & (!data_hready_i | dph_error)) & !hazard_ldst_rs1;
+
+// While the base register is still being produced, the misalign / PMP / watchpoint outputs below are masked
+assign ex_ldst_unresolved_o = hazard_ldst_rs1;
+assign wb_ldst_ready_o      = !dph_wait;
+assign wb_dph_ongoing_o     =  dph_ongoing;
+
 
 // Error detection
-assign wb_excp_access_fault               =   dph_error;
+assign wb_bus_error                       =   dph_error;
 assign ex_excp_address_misaligned         =  (ex_size==3'b011)                               |
                                             ((ex_size==3'b010) & (data_haddr_o[1:0]!=2'b00)) |
                                             ((ex_size==3'b001) & (data_haddr_o[0]  !=1'b0 )) ;
@@ -264,8 +304,38 @@ assign ex_excp_address_misaligned         =  (ex_size==3'b011)                  
 assign ex_excp_load_address_misaligned_o  = ex_excp_address_misaligned &  ex_is_load & !hazard_ldst_rs1;
 assign ex_excp_store_address_misaligned_o = ex_excp_address_misaligned & !ex_is_load & !hazard_ldst_rs1;
 
-assign wb_excp_load_access_fault_o        = wb_excp_access_fault       &  dph_is_load;
-assign wb_excp_store_access_fault_o       = wb_excp_access_fault       & !dph_is_load;
+// PMP. The checker sees data_haddr_o, the same EX-stage sum the trap unit samples
+// into mtval, so the fault and the address it reports cannot disagree.
+// The Zcmt table entry read is an implicit instruction fetch (Unpriv 28.14.2):
+// checked for X at the current privilege, never under MPRV, and not as a load.
+wire  [1:0] pmp_priv     = ex_uop_jt_active_i ? priv_mode_jt_i : priv_mode_ldst_i;
+wire        pmp_acc_read = ex_is_load & ~ex_uop_jt_active_i;
+wire        pmp_acc_exec = ex_uop_jt_active_i;
+
+arv_pmp_check #(.PMP_NR(PMP_NR)) arv_pmp_check_ldst_inst (
+                    .pmp_cfg_i      ( pmp_cfg_i        ),
+                    .pmp_addr_i     ( pmp_addr_i       ),
+                    .pmp_mml_i      ( pmp_mml_i        ),
+                    .pmp_mmwp_i     ( pmp_mmwp_i       ),
+                    .addr_i         ( data_haddr_o     ),
+                    .priv_i         ( pmp_priv         ),
+                    .acc_read_i     ( pmp_acc_read     ),
+                    .acc_write_i    ( ex_is_store      ),
+                    .acc_exec_i     ( pmp_acc_exec     ),
+                    .fault_o        ( pmp_fault        ));
+
+assign ex_excp_pmp_fault                  = pmp_fault & (ex_is_load | ex_is_store);
+
+// hazard_ldst_rs1 qualifies the outputs
+assign ex_excp_load_access_fault_o        = ex_excp_pmp_fault &  ex_is_load & !hazard_ldst_rs1;
+assign ex_excp_store_access_fault_o       = ex_excp_pmp_fault & !ex_is_load & !hazard_ldst_rs1;
+
+// Sdtrig load/store watchpoint qualifiers: a valid load/store access is present in EX.
+assign ex_is_load_o                       =  ex_is_load  & !hazard_ldst_rs1;
+assign ex_is_store_o                      =  ex_is_store & !hazard_ldst_rs1;
+
+assign wb_bus_error_load_o                = wb_bus_error &  dph_is_load;
+assign wb_bus_error_store_o               = wb_bus_error & !dph_is_load;
 
 
 //////======================================================================================================================//////
@@ -293,10 +363,31 @@ arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_waw_conflict (
 //////======================================================================================================================//////
 
 arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_wb_pc (
-                    .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(aph_valid), .d_i(ex_pc_i),      .q_o(wb_pc_o));
+                    .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(aph_valid), .d_i(ex_pc_i),            .q_o(wb_pc_o));
 
 arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_wb_data_addr (
-                    .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(aph_valid), .d_i(data_haddr_o), .q_o(wb_data_addr_o));
+                    .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(aph_valid), .d_i(data_haddr_o),       .q_o(wb_data_addr_o));
+
+// Says whether the access in the data phase came from a Zcmp/Zcmt micro-op.
+arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_wb_uop_sourced (
+                    .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(aph_valid), .d_i(ex_uop_enable_i),    .q_o(wb_uop_sourced_o));
+
+// Captured beside the provenance, for the same reason: a Zcmt table read cannot be replayed.
+arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_wb_uop_jt_sourced (
+                    .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(aph_valid), .d_i(ex_uop_jt_active_i), .q_o(wb_uop_jt_sourced_o));
+
+// SEQUENCE LIVENESS -- "does the sequence that ISSUED the outstanding access still own the
+// pipeline?" Provenance alone cannot separate a restartable fault from a report-only one: both
+// say "a UOP micro-op". What separates them is whether THAT sequence is still running.
+wire seq_alive_set = aph_valid & ex_uop_enable_i & ~ex_uop_ready_i;
+wire seq_alive_clr = ex_uop_ready_i;
+wire seq_alive_q;
+
+arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_seq_alive (
+                    .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(seq_alive_set | seq_alive_clr),
+                                                         .d_i (seq_alive_set), .q_o(seq_alive_q));
+
+assign wb_uop_seq_alive_o = seq_alive_q & ex_uop_enable_i;
 
 
 endmodule // arv_load_store

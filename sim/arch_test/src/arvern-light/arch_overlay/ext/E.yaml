@@ -1,0 +1,45 @@
+# Copyright (c) 2026, aRVern-dev
+# SPDX-License-Identifier: BSD-3-Clause
+
+# UDB arch overlay: the E (embedded) base ISA.
+#
+# WHY THIS FILE EXISTS. riscv-arch-test ships a full RV32E test suite under
+# tests/rv32e/, and every one of those tests declares `REQUIRED_EXTENSIONS:
+# ['E']`. The framework selects tests by intersecting that set with the output
+# of `udb list extensions` (framework/src/act/select_tests.py), which comes from
+# the UDB database -- and UDB has no E extension. It is absent from udb 0.1.15's
+# spec/std/isa/ext/ and from riscv-unified-db main. So with the stock database
+# NO configuration can select a single rv32e test: they are generated, CI-
+# checked, and unreachable.
+#
+# Rather than patch the suite or the gem, this uses UDB's own documented
+# `arch_overlay` mechanism (config_schema.json: "Optional arch overlay to
+# apply") to add the missing extension definition for this config only. The
+# overlay is inert for every other persona.
+#
+# SCOPE. This is deliberately the minimum the schema requires -- name, type,
+# long_name, description, versions. It defines no instructions, no CSRs and no
+# params, because nothing in the ACT flow needs them: the rv32e tests are
+# pre-generated .S files, the compiler gets `-march=rv32e_*` / `-mabi=ilp32e`
+# from each test's own header (build_plan.py), and the reference model knows E
+# natively via sail.json `base.E: true`. The only job of this file is to make
+# the name resolvable so test selection works.
+#
+# Delete it once UDB defines E upstream.
+---
+$schema: "ext_schema.json#"
+kind: extension
+name: E
+type: unprivileged
+long_name: Base embedded integer ISA (RV32E or RV64E)
+versions:
+  - version: "2.0.0"
+    state: ratified
+    ratification_date: 2024-04
+description: |
+  The base embedded integer ISA. Identical to the I base ISA except that it
+  provides 16 integer registers (x0-x15) instead of 32, which halves the
+  register-file area at the cost of code density.
+
+  misa reports E in bit 4 and I in bit 8; an RV32E implementation sets bit 4
+  and clears bit 8 (aRVern: arv_csr_ids.v, `~RV32I_EN` / `RV32I_EN`).

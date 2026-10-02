@@ -37,17 +37,15 @@ module  arv_dff #(
 
 generate
     if (ARST_EN) begin : g_async_rst
-        // Asynchronous active-low reset: reset test (rst_n_i) matches the negedge
-        // term in the sensitivity list -> DC infers an async-reset flop.
+        // Reset test matches the negedge term -> DC infers an async-reset flop.
         always @(posedge clk_i or negedge rst_n_i)
-            if      (!rst_n_i) q_o <= RST_VAL;
-            else if ( en_i   ) q_o <= d_i;
+            if      (rst_n_i == 1'b0) q_o <= RST_VAL;
+            else if (en_i    == 1'b1) q_o <= d_i;
     end else begin : g_sync_rst
-        // Synchronous reset: no async edge term; rst_n_i is sampled on the clock
-        // edge -> DC infers a sync-reset flop.
+        // No async edge term -> DC infers a sync-reset flop.
         always @(posedge clk_i)
-            if      (!rst_n_i) q_o <= RST_VAL;
-            else if ( en_i   ) q_o <= d_i;
+            if      (rst_n_i == 1'b0) q_o <= RST_VAL;
+            else if (en_i    == 1'b1) q_o <= d_i;
     end
 endgenerate
 

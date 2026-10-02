@@ -63,7 +63,6 @@ module  arv_int_registers (
 
 // TRAP WRITE-BACK SUPPRESSION
     input  wire           trap_kill_ex_i,
-    input  wire           trap_kill_wb_i,
 
 // JALR SHADOW REGISTER
     input  wire           id_opcode_jalr_i,
@@ -72,7 +71,15 @@ module  arv_int_registers (
     output wire     [4:0] id_jalr_shadow_sel_o,
 
 // EX DESTINATION REGISTER (MUX OF DECODER AND UOP OVERRIDE, FOR WAW DETECTION)
-    output wire     [4:0] ex_reg_dest_sel_mux_o
+    output wire     [4:0] ex_reg_dest_sel_mux_o,
+
+// DEBUG-MODULE GPR SIDE-PORT
+    input  wire           dm_gpr_wen_i,
+    input  wire     [4:0] dm_gpr_waddr_i,
+    input  wire    [31:0] dm_gpr_wdata_i,
+    input  wire     [4:0] dm_gpr_raddr_i,
+    input  wire           dm_gpr_ren_i,
+    output wire    [31:0] dm_gpr_rdata_o
 
 );
 
@@ -167,21 +174,22 @@ wire                      shadow_wr_from_wb;
 // Trap write-back suppression: gate write enables internally
 wire   ex_alu_wr_gated       = ex_alu_reg_dest_wr_i  & ~trap_kill_ex_i;
 wire   ex_csr_wr_gated       = ex_csr_reg_dest_wr_i  & ~trap_kill_ex_i;
-wire   wb_load_wr_gated      = wb_load_reg_dest_wr_i & ~trap_kill_wb_i;
 wire   ex_uop_a0_gated       = ex_uop_a0_zero_en_i   & ~trap_kill_ex_i;
 wire   ex_uop_mv_gated       = ex_uop_mv_dest_ctrl_i & ~trap_kill_ex_i;
 
 // Destination Register selector EX phase
-assign ex_reg_dest_wr        = (ex_alu_wr_gated | ex_csr_wr_gated);
+assign ex_reg_dest_wr        = (ex_alu_wr_gated | ex_csr_wr_gated | dm_gpr_wen_i) ;
 assign ex_reg_dest_wdata     = ({32{ex_alu_wr_gated}} & ex_alu_reg_dest_wdata_i ) |
-                               ({32{ex_csr_wr_gated}} & ex_csr_reg_dest_wdata_i ) ;
-assign ex_reg_dest_sel_mux   = ex_uop_mv_gated ? ex_uop_mv_dest1_i : ex_reg_dest_sel_i;
+                               ({32{ex_csr_wr_gated}} & ex_csr_reg_dest_wdata_i ) |
+                               ({32{dm_gpr_wen_i   }} & dm_gpr_wdata_i          ) ;
+assign ex_reg_dest_sel_mux   = ex_uop_mv_gated ? ex_uop_mv_dest1_i :
+                               dm_gpr_wen_i    ? dm_gpr_waddr_i    : ex_reg_dest_sel_i;
 assign ex_reg_dest_sel_mux_o = ex_reg_dest_sel_mux;
 
 assign ex_reg_dest_sel_1hot  = ({31'h00000000, ex_reg_dest_wr} << ex_reg_dest_sel_mux);
 
 // Destination Register selector WB phase
-assign wb_reg_dest_wr        =  wb_load_wr_gated         ;
+assign wb_reg_dest_wr        =  wb_load_reg_dest_wr_i    ;
 assign wb_reg_dest_wdata     =  wb_load_reg_dest_wdata_i ;
 assign wb_reg_dest_sel_1hot  = ({31'h00000000, wb_reg_dest_wr} << wb_reg_dest_sel_i);
 
@@ -274,6 +282,8 @@ arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_reg_x09_s1 (
 // X10 (a0: return value or function argument 0)
 //-----------------------------------------------
 // CM.POPRETZ semantics: zero a0/x10 on the final branch cycle (uop_counter==0).
+// Invariant: ex_uop_a0_gated fires only on the POPRET state-0 branch cycle, so no dependent
+// instruction can read a0 in the same cycle -- the zeroing is invisible to forwarding by construction.
 wire [31:0] reg_x10_a0;
 assign      reg_x10_a0_read = reg_x10_a0;
 wire        reg_x10_a0_en   =  ex_uop_a0_gated | ex_reg_dest_sel_1hot[10] | wb_reg_dest_sel_1hot[10];
@@ -536,7 +546,9 @@ assign shadow_wr_from_wb          =  wb_reg_dest_wr & (wb_reg_dest_sel_i   == sh
 // Reset value rationale: in compressed mode compilers typically use x13 as the JALR
 // base register, whereas in standard (non-compressed) mode they use x1 (ra); seeding
 // shadow_sel with the most likely base avoids an initial JALR shadow-miss stall.
-wire       shadow_sel_jalr_load = id_opcode_jalr_i    & ~id_jalr_shadow_valid;
+// Defer the JALR-miss load while a write override is active (CM.MVA01S/MVSA01 phase-0, DM GPR write)
+wire       shadow_load_hold     = ex_uop_mv_gated | dm_gpr_wen_i;
+wire       shadow_sel_jalr_load = id_opcode_jalr_i    & ~id_jalr_shadow_valid & ~shadow_load_hold;
 wire       shadow_sel_ret_load  = ex_uop_ret_branch_i & ~ex_uop_ret_shadow_valid;
 wire       shadow_sel_en        = shadow_sel_jalr_load | shadow_sel_ret_load;
 wire [4:0] shadow_sel_nxt       = shadow_sel_jalr_load ? id_reg_src1_sel_i :
@@ -578,22 +590,30 @@ arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_shadow_rdata (
 // during CM.MVA01S/MVSA01 phase-0 is `ex_reg_dest_sel_mux` (= ex_uop_mv_dest1_i),
 // not `ex_reg_dest_sel_i`. The forwarding comparators below use `_i`, not `_mux`.
 // Safety invariant: the UOP sequencer stalls decode during MV phase-0 (the
-// `_mux != _i` window), so no new decode-stage rs1/rs2 comparison fires while
+// `_mux != _i` window), so no decode-stage rs1/rs2 comparison is CONSUMED while
 // the asymmetry is active. Phase-0's dest is committed before the next decode
-// dispatch - see arv_uop_sequencer.v's uop_in_kill_window / stall logic.
-assign ex_reg_src1_eq_dest        =  (id_reg_src1_sel_i==ex_reg_dest_sel_i) & ~ex_reg_dest_sel_1hot[0] & ex_reg_dest_wr ;
-assign ex_reg_src2_eq_dest        =  (id_reg_src2_sel_i==ex_reg_dest_sel_i) & ~ex_reg_dest_sel_1hot[0] & ex_reg_dest_wr ;
+// dispatch - see arv_uop_sequencer.v's uop_in_kill_window / stall logic. The
+// JALR shadow load is the one consumer that is not covered by that stall and
+// is held separately (shadow_load_hold above).
+// RV32E narrowing for the decode-phase forwarding comparators: a write with dest in
+// x16..x31 is dropped by the regfile (RAZ/WI contract), so its in-flight wdata must
+// not be forwarded either - same gate as the JALR-shadow rv32e_shadow_sel_upper.
+wire   rv32e_ex_dest_upper        =  ~RV32I_EN & ex_reg_dest_sel_i[4];
+wire   rv32e_wb_dest_upper        =  ~RV32I_EN & wb_reg_dest_sel_i[4];
 
-assign wb_reg_src1_eq_dest        =  (id_reg_src1_sel_i==wb_reg_dest_sel_i) & ~wb_reg_dest_sel_1hot[0] & wb_reg_dest_wr & ~ex_reg_src1_eq_dest;
-assign wb_reg_src2_eq_dest        =  (id_reg_src2_sel_i==wb_reg_dest_sel_i) & ~wb_reg_dest_sel_1hot[0] & wb_reg_dest_wr & ~ex_reg_src2_eq_dest;
+assign ex_reg_src1_eq_dest        =  (id_reg_src1_sel_i==ex_reg_dest_sel_i) & ~ex_reg_dest_sel_1hot[0] & ex_reg_dest_wr & ~rv32e_ex_dest_upper;
+assign ex_reg_src2_eq_dest        =  (id_reg_src2_sel_i==ex_reg_dest_sel_i) & ~ex_reg_dest_sel_1hot[0] & ex_reg_dest_wr & ~rv32e_ex_dest_upper;
+
+assign wb_reg_src1_eq_dest        =  (id_reg_src1_sel_i==wb_reg_dest_sel_i) & ~wb_reg_dest_sel_1hot[0] & wb_reg_dest_wr & ~rv32e_wb_dest_upper & ~ex_reg_src1_eq_dest;
+assign wb_reg_src2_eq_dest        =  (id_reg_src2_sel_i==wb_reg_dest_sel_i) & ~wb_reg_dest_sel_1hot[0] & wb_reg_dest_wr & ~rv32e_wb_dest_upper & ~ex_reg_src2_eq_dest;
 
 // Forwarding comparators for fast-path branch rs1 & rs2 - same `_i` vs `_mux` rationale and
 // UOP-stall invariant as above.
-assign ex_branch_rs1_eq_dest      =  (id_branch_rs1_fast_sel_i==ex_reg_dest_sel_i) & ~ex_reg_dest_sel_1hot[0] & ex_reg_dest_wr;
-assign ex_branch_rs2_eq_dest      =  (id_branch_rs2_fast_sel_i==ex_reg_dest_sel_i) & ~ex_reg_dest_sel_1hot[0] & ex_reg_dest_wr;
+assign ex_branch_rs1_eq_dest      =  (id_branch_rs1_fast_sel_i==ex_reg_dest_sel_i) & ~ex_reg_dest_sel_1hot[0] & ex_reg_dest_wr & ~rv32e_ex_dest_upper;
+assign ex_branch_rs2_eq_dest      =  (id_branch_rs2_fast_sel_i==ex_reg_dest_sel_i) & ~ex_reg_dest_sel_1hot[0] & ex_reg_dest_wr & ~rv32e_ex_dest_upper;
 
-assign wb_branch_rs1_eq_dest      =  (id_branch_rs1_fast_sel_i==wb_reg_dest_sel_i) & ~wb_reg_dest_sel_1hot[0] & wb_reg_dest_wr & ~ex_branch_rs1_eq_dest;
-assign wb_branch_rs2_eq_dest      =  (id_branch_rs2_fast_sel_i==wb_reg_dest_sel_i) & ~wb_reg_dest_sel_1hot[0] & wb_reg_dest_wr & ~ex_branch_rs2_eq_dest;
+assign wb_branch_rs1_eq_dest      =  (id_branch_rs1_fast_sel_i==wb_reg_dest_sel_i) & ~wb_reg_dest_sel_1hot[0] & wb_reg_dest_wr & ~rv32e_wb_dest_upper & ~ex_branch_rs1_eq_dest;
+assign wb_branch_rs2_eq_dest      =  (id_branch_rs2_fast_sel_i==wb_reg_dest_sel_i) & ~wb_reg_dest_sel_1hot[0] & wb_reg_dest_wr & ~rv32e_wb_dest_upper & ~ex_branch_rs2_eq_dest;
 
 // Destination Register selector.
 //
@@ -669,11 +689,11 @@ assign id_reg_src1_rdata_wo_fwd   = (reg_x00_zero_read    & {32{id_reg_src1_sel_
                                     (reg_x31_t6_read      & {32{id_reg_src1_sel_1hot[31]}})   ;
 
 // Source register 1 including ongoing-writes
-assign id_reg_src1_rdata_w_fwd_o  =  id_reg_src1_rdata_wo_fwd & {32{~(wb_reg_src1_eq_dest | ex_reg_src1_eq_dest)}} |
-                                    (ex_reg_dest_wdata        & {32{id_reg_src1_sel_1hot[32]}})                    |
-                                    (wb_reg_dest_wdata        & {32{id_reg_src1_sel_1hot[33]}})                    ;
+assign id_reg_src1_rdata_w_fwd_o  = (id_reg_src1_rdata_wo_fwd & {32{~(wb_reg_src1_eq_dest | ex_reg_src1_eq_dest)}}) |
+                                    (ex_reg_dest_wdata        & {32{id_reg_src1_sel_1hot[32]}})                     |
+                                    (wb_reg_dest_wdata        & {32{id_reg_src1_sel_1hot[33]}})                     ;
 
-// Branch Source register 1 read mux (fast-path branch rs1 read - uses id_branch_rs1_fast_sel_i (2-way mux, ~0.2ns vs 1.36ns for id_reg_src1_sel_i)
+// Branch source register 1 read mux: fast-path rs1 read via the earlier-arriving id_branch_rs1_fast_sel_i select.
 assign id_branch_rs1_sel_1hot     = {wb_branch_rs1_eq_dest, ex_branch_rs1_eq_dest, (32'h00000001 << id_branch_rs1_fast_sel_i)};
 assign id_branch_rs1_rdata_wo_fwd = (reg_x00_zero_read    & {32{id_branch_rs1_sel_1hot[ 0]}})   |
                                     (reg_x01_ra_read      & {32{id_branch_rs1_sel_1hot[ 1]}})   |
@@ -709,9 +729,9 @@ assign id_branch_rs1_rdata_wo_fwd = (reg_x00_zero_read    & {32{id_branch_rs1_se
                                     (reg_x31_t6_read      & {32{id_branch_rs1_sel_1hot[31]}})   ;
 
 // Branch source register 1 including ongoing-writes
-assign id_branch_rs1_rdata_w_fwd_o =  id_branch_rs1_rdata_wo_fwd & {32{~(wb_branch_rs1_eq_dest | ex_branch_rs1_eq_dest)}} |
-                                     (ex_reg_dest_wdata          & {32{id_branch_rs1_sel_1hot[32]}})                      |
-                                     (wb_reg_dest_wdata          & {32{id_branch_rs1_sel_1hot[33]}})                      ;
+assign id_branch_rs1_rdata_w_fwd_o = (id_branch_rs1_rdata_wo_fwd & {32{~(wb_branch_rs1_eq_dest | ex_branch_rs1_eq_dest)}}) |
+                                     (ex_reg_dest_wdata          & {32{id_branch_rs1_sel_1hot[32]}})                       |
+                                     (wb_reg_dest_wdata          & {32{id_branch_rs1_sel_1hot[33]}})                       ;
 
 // Source register 2 read mux
 assign id_reg_src2_rdata_wo_fwd   = (reg_x00_zero_read    & {32{id_reg_src2_sel_1hot[ 0]}})   |
@@ -748,9 +768,9 @@ assign id_reg_src2_rdata_wo_fwd   = (reg_x00_zero_read    & {32{id_reg_src2_sel_
                                     (reg_x31_t6_read      & {32{id_reg_src2_sel_1hot[31]}})   ;
 
 // Source register 2 including ongoing-writes
-assign id_reg_src2_rdata_w_fwd_o  =  id_reg_src2_rdata_wo_fwd & {32{~(wb_reg_src2_eq_dest | ex_reg_src2_eq_dest)}} |
-                                    (ex_reg_dest_wdata        & {32{id_reg_src2_sel_1hot[32]}})                    |
-                                    (wb_reg_dest_wdata        & {32{id_reg_src2_sel_1hot[33]}})                    ;
+assign id_reg_src2_rdata_w_fwd_o  = (id_reg_src2_rdata_wo_fwd & {32{~(wb_reg_src2_eq_dest | ex_reg_src2_eq_dest)}}) |
+                                    (ex_reg_dest_wdata        & {32{id_reg_src2_sel_1hot[32]}})                     |
+                                    (wb_reg_dest_wdata        & {32{id_reg_src2_sel_1hot[33]}})                     ;
 
 // Timing: fast-path branch rs2 read - uses id_branch_rs2_fast_sel_i
 assign id_branch_rs2_sel_1hot     = {wb_branch_rs2_eq_dest, ex_branch_rs2_eq_dest, (32'h00000001 << id_branch_rs2_fast_sel_i)};
@@ -786,9 +806,10 @@ assign id_branch_rs2_rdata_wo_fwd = (reg_x00_zero_read    & {32{id_branch_rs2_se
                                     (reg_x29_t4_read      & {32{id_branch_rs2_sel_1hot[29]}})   |
                                     (reg_x30_t5_read      & {32{id_branch_rs2_sel_1hot[30]}})   |
                                     (reg_x31_t6_read      & {32{id_branch_rs2_sel_1hot[31]}})   ;
-assign id_branch_rs2_rdata_w_fwd_o =  id_branch_rs2_rdata_wo_fwd & {32{~(wb_branch_rs2_eq_dest | ex_branch_rs2_eq_dest)}} |
-                                     (ex_reg_dest_wdata          & {32{id_branch_rs2_sel_1hot[32]}})                      |
-                                     (wb_reg_dest_wdata          & {32{id_branch_rs2_sel_1hot[33]}})                      ;
+
+assign id_branch_rs2_rdata_w_fwd_o = (id_branch_rs2_rdata_wo_fwd & {32{~(wb_branch_rs2_eq_dest | ex_branch_rs2_eq_dest)}}) |
+                                     (ex_reg_dest_wdata          & {32{id_branch_rs2_sel_1hot[32]}})                       |
+                                     (wb_reg_dest_wdata          & {32{id_branch_rs2_sel_1hot[33]}})                       ;
 
 
 //////======================================================================================================================//////
@@ -820,7 +841,11 @@ assign id_branch_rs2_rdata_w_fwd_o =  id_branch_rs2_rdata_wo_fwd & {32{~(wb_bran
 // UOP ldst, or make this field one-hot among real regs.
 // Forwarding tags are not merged at EX phase (no [33:32] here, unlike decode).
 assign ex_reg_src1_sel_1hot       = (32'h00000001 << ex_reg_src1_sel_i) | ex_uop_src1_sel_i;
-assign ex_reg_src2_sel_1hot       = (32'h00000001 << ex_reg_src2_sel_i) | ex_uop_src2_sel_i;
+
+// Debug GPR reads (frozen hart) STEAL the src2 read port, and it
+// restores to the normal select on resume.
+assign ex_reg_src2_sel_1hot       = dm_gpr_ren_i ?  (32'h00000001 << dm_gpr_raddr_i   ) :
+                                                   ((32'h00000001 << ex_reg_src2_sel_i) | ex_uop_src2_sel_i);
 
 // Source register 1
 assign ex_reg_src1_rdata_wo_fwd_o = (reg_x00_zero_read    & {32{ex_reg_src1_sel_1hot[ 0]}})  |
@@ -889,6 +914,19 @@ assign ex_reg_src2_rdata_wo_fwd_o = (reg_x00_zero_read    & {32{ex_reg_src2_sel_
                                     (reg_x29_t4_read      & {32{ex_reg_src2_sel_1hot[29]}})  |
                                     (reg_x30_t5_read      & {32{ex_reg_src2_sel_1hot[30]}})  |
                                     (reg_x31_t6_read      & {32{ex_reg_src2_sel_1hot[31]}})  ;
+
+
+//////======================================================================================================================//////
+//////======================================================================================================================//////
+//////                                                                                                                      //////
+//////                                       DEBUG-MODULE GPR READ PATHS                                                    //////
+//////                                                                                                                      //////
+//////======================================================================================================================//////
+//////======================================================================================================================//////
+
+// Read result comes from the SHARED ex_reg_src2 read port (see ex_reg_src2_sel_1hot above)
+assign dm_gpr_rdata_o             = ex_reg_src2_rdata_wo_fwd_o;
+
 
 
 endmodule // arv_int_registers

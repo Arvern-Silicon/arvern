@@ -41,7 +41,7 @@ Examples:
 
   # Show a group of trap-related signals, clock period 10000 ticks
   python3 vcd_trace.py tb_arvern.vcd irq_software_i mstatus_mie irq_detect \\
-      trap_pending_o trap_taken irq_suppress_post_mret \\
+      trap_pending trap_taken irq_suppress_post_mret \\
       --cycles 540:640 --clk-period 10000
 """
 

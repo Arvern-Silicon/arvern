@@ -15,12 +15,12 @@
 
 """bench_snapshot — Save, update, or list named snapshots of trace statistics.
 
-Usage (from sim/rtl_sim/run/):
-    ../bin/bench_snapshot                          # list existing snapshots
-    ../bin/bench_snapshot <name>
-    ../bin/bench_snapshot before_branch_pred --desc "Before branch predictor"
-    ../bin/bench_snapshot v1 --dir ./benchmark_traces --force
-    ../bin/bench_snapshot v1 --update              # update existing snapshot
+Usage (from sim/rtl_sim/run/, via the wrapper):
+    ./benchmark_trace_snapshot                     # list existing snapshots
+    ./benchmark_trace_snapshot <name>
+    ./benchmark_trace_snapshot before_branch_pred --desc "Before branch predictor"
+    ./benchmark_trace_snapshot v1 --dir ./benchmark_traces --force
+    ./benchmark_trace_snapshot v1 --update         # update existing snapshot
 """
 
 import argparse

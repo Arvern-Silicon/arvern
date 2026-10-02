@@ -85,6 +85,7 @@ _start:
 
     # Store nmi_handler address in scratchpad for testbench to read
     la   t0, nmi_handler
+    csrw 0x7FD, t0            # marv_nmvec = RNMI handler (firmware places its own vector)
     sw   t0, 0x08(s1)          # nmi_handler_addr
 
     # Install safe mtvec (regular exceptions go here)

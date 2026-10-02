@@ -28,7 +28,7 @@ integer kk;
 integer ahb_master;
 integer allow_peripheral_accesses;
 
-`define SPAD(byte_off)  (byte_off/4)
+`define SPAD(byte_off)  ((byte_off)/4)
 
 // Auto-drop the PLIC source whose ID is written to scratchpad[0x80] by
 // the trap handler. Only source 1 is used by this test.

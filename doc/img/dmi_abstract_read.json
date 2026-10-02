@@ -1,0 +1,13 @@
+{signal: [
+  {name: 'DMI transaction',      wave: '333.', data: ['1: write command', '2: read abstractcs', '3: read data0']},
+  {},
+  {name: 'DM reg (PADDR[8:2])',  wave: '333.', data: ['0x17', '0x16', '0x04']},
+  {name: 'dmi_pwrite_i',         wave: '444.', data: ['WRITE', 'READ', 'READ']},
+  {name: 'dmi_pwdata_i',         wave: '5x..', data: ['0x0022100A']},
+  {},
+  {name: 'dmi_prdata_o',         wave: 'x55.', data: ['busy=0, cmderr=0', '0xDEADBEEF']},
+],
+  head: {text: 'Abstract read of GPR x10 - each column is one APB (DMI) transaction'},
+  foot: {text: 'command 0x0022100A = Access Register, regno=0x100A (x10), read'},
+  config: {hscale: 3}
+}

@@ -13,6 +13,7 @@
 #----------------------------------------------------------------------------
 
 .section .text
+.option push
 .option norvc        # disable all compressed instructions in this section
 .global main
 
@@ -77,7 +78,7 @@ main:
     # Encoding: 100_001_rs1'[2:0]_uimm[1]_1_rd'[2:0]_00
     #           bit [6] = 1 for C.LH (vs C.LHU where bit [6] = 0)
     #-------------------------------------------------
-.option rvc          # enable compressed instructions
+.option pop          # enable compressed instructions
 
     # Test SET 1: Load halfwords from SRAM+0 using x8 as base
     # 0x0001 (positive) → 0x00000001
@@ -85,6 +86,7 @@ main:
     c.lh  x9,  0(x8)   # x9  = 0x00000001  <--  SRAM+0 (sign-extend 0x0001)
     c.lh  x10, 2(x8)   # x10 = 0x00007FFF  <--  SRAM+2 (sign-extend 0x7FFF)
 
+.option push
 .option norvc
     # Backup first set of loads to x17-x18
     addi x17, x9,  0    # Backup x9  = 0x00000001
@@ -94,10 +96,11 @@ main:
     # 0x7FFE (positive) → 0x00007FFE
     # 0x8000 (negative min) → 0xFFFF8000
     addi  x9, x29, 4    # x9 = SRAM base + 4
-.option rvc
+.option pop
     c.lh  x10, 0(x9)   # x10 = 0x00007FFE  <--  SRAM+4 (sign-extend 0x7FFE)
     c.lh  x11, 2(x9)   # x11 = 0xFFFF8000  <--  SRAM+6 (sign-extend 0x8000)
 
+.option push
 .option norvc
     # Backup second set of loads to x19-x20
     addi x19, x10, 0    # Backup x10 = 0x00007FFE
@@ -107,10 +110,11 @@ main:
     # 0x1234 (positive) → 0x00001234
     # 0xFFFF (negative -1) → 0xFFFFFFFF
     addi  x10, x29, 8   # x10 = SRAM base + 8
-.option rvc
+.option pop
     c.lh  x11, 0(x10)  # x11 = 0x00001234  <--  SRAM+8  (sign-extend 0x1234)
     c.lh  x12, 2(x10)  # x12 = 0xFFFFFFFF  <--  SRAM+10 (sign-extend 0xFFFF)
 
+.option push
 .option norvc
     # Backup third set of loads to x21-x22
     addi x21, x11, 0    # Backup x11 = 0x00001234
@@ -120,10 +124,11 @@ main:
     # 0x5678 (positive) → 0x00005678
     # 0xABCD (negative) → 0xFFFFABCD
     addi  x11, x29, 12  # x11 = SRAM base + 12
-.option rvc
+.option pop
     c.lh  x12, 0(x11)  # x12 = 0x00005678  <--  SRAM+12 (sign-extend 0x5678)
     c.lh  x13, 2(x11)  # x13 = 0xFFFFABCD  <--  SRAM+14 (sign-extend 0xABCD)
 
+.option push
 .option norvc
     # Backup fourth set of loads to x23-x24
     addi x23, x12, 0    # Backup x12 = 0x00005678
@@ -133,10 +138,11 @@ main:
     # 0xBEEF (negative) → 0xFFFFBEEF
     # 0xDEAD (negative) → 0xFFFFDEAD
     addi  x12, x29, 16  # x12 = SRAM base + 16
-.option rvc
+.option pop
     c.lh  x13, 0(x12)  # x13 = 0xFFFFBEEF  <--  SRAM+16 (sign-extend 0xBEEF)
     c.lh  x14, 2(x12)  # x14 = 0xFFFFDEAD  <--  SRAM+18 (sign-extend 0xDEAD)
 
+.option push
 .option norvc
     # Backup fifth set of loads to x25-x26
     addi x25, x13, 0    # Backup x13 = 0xFFFFBEEF
@@ -146,10 +152,11 @@ main:
     # 0xBABE (negative) → 0xFFFFBABE
     # 0xCAFE (negative) → 0xFFFFCAFE
     addi  x13, x29, 20  # x13 = SRAM base + 20
-.option rvc
+.option pop
     c.lh  x14, 0(x13)  # x14 = 0xFFFFBABE  <--  SRAM+20 (sign-extend 0xBABE)
     c.lh  x15, 2(x13)  # x15 = 0xFFFFCAFE  <--  SRAM+22 (sign-extend 0xCAFE)
 
+.option push
 .option norvc
     # Backup sixth set of loads to x27-x28
     addi x27, x14, 0    # Backup x14 = 0xFFFFBABE
@@ -159,10 +166,11 @@ main:
     # 0x4321 (positive) → 0x00004321
     # 0x8765 (negative) → 0xFFFF8765
     addi  x14, x29, 24  # x14 = SRAM base + 24
-.option rvc
+.option pop
     c.lh  x15, 0(x14)  # x15 = 0x00004321  <--  SRAM+24 (sign-extend 0x4321)
     c.lh  x8,  2(x14)  # x8  = 0xFFFF8765  <--  SRAM+26 (sign-extend 0x8765)
 
+.option push
 .option norvc
     # Backup seventh set of loads to x1-x2
     addi x1, x15, 0     # Backup x15 = 0x00004321
@@ -172,10 +180,11 @@ main:
     # 0x0123 (positive) → 0x00000123
     # 0x9ABC (negative) → 0xFFFF9ABC
     addi  x15, x29, 28  # x15 = SRAM base + 28
-.option rvc
+.option pop
     c.lh  x8,  0(x15)  # x8  = 0x00000123  <--  SRAM+28 (sign-extend 0x0123)
     c.lh  x9,  2(x15)  # x9  = 0xFFFF9ABC  <--  SRAM+30 (sign-extend 0x9ABC)
 
+.option push
 .option norvc
 
     #-------------------------------------------------

@@ -1,0 +1,20 @@
+{signal: [
+  {name: 'hclk_i',        wave: 'p......'},
+  {},
+  ['APB master -> DM',
+    {name: 'dmi_psel_i',    wave: '01...0.'},
+    {name: 'dmi_penable_i', wave: '0.1..0.'},
+    {name: 'dmi_paddr_i',   wave: 'x3...x.', data: ['0x044']},
+    {name: 'dmi_pwrite_i',  wave: '0.....'},
+  ],
+  {},
+  ['DM -> APB master',
+    {name: 'dmi_pready_o',  wave: '0...10.'},
+    {name: 'dmi_prdata_o',  wave: 'x...5x.', data: ['0x000003A3']},
+    {name: 'dmi_pslverr_o', wave: '0.....'},
+  ],
+],
+  head: {text: 'APB wait states: master holds the transfer through ACCESS until PREADY'},
+  foot: {text: 'PREADY is latency-agnostic; the aRVern DM asserts it after 1 wait state (2 shown for clarity)'},
+  config: {hscale: 2}
+}

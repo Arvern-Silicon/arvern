@@ -30,6 +30,7 @@ module  arv_csr_hpm (
     input  wire    [63:0] register_sel_i,
     input  wire    [31:0] register_value_nxt_i,
     input  wire           disable_write_i,
+    input  wire           stopcount_freeze_i,  // dcsr.stopcount & Debug Mode: freeze increments (writes still land)
 
 // CORE AND PLATFORM EVENT INPUTS
     input  wire     [9:0] core_events_i,       // [9:0]  internal pipeline events
@@ -41,7 +42,7 @@ module  arv_csr_hpm (
 
 );
 
-parameter                 ARST_EN      = 1;    // Reset style: 1=async (negedge hresetn_i), 0=sync (async term tied high -> sync-reset FF)
+parameter                 ARST_EN      = 1'b1; // Reset style: 1=async (negedge hresetn_i), 0=sync (async term tied high -> sync-reset FF)
 parameter                 ZIHPM_NR     = 0;    // Number of HPM counters implemented: 0-8
 
 
@@ -153,18 +154,20 @@ generate
                                    (mhpmevent_reg[i] == 5'h0F) ? platform_events_i[4]  :
                                    (mhpmevent_reg[i] == 5'h10) ? platform_events_i[5]  :
                                    (mhpmevent_reg[i] == 5'h11) ? platform_events_i[6]  :
-                                   (mhpmevent_reg[i] == 5'h12) ? platform_events_i[7]  : 1'b0;
+                                                                 platform_events_i[7];     // 0x12: the write fold keeps the selector <= 0x12
 
             // Combinatorial live inhibit: csrrc/csrrs takes effect in the same EX cycle,
             // not one cycle later via the registered path.
             wire hpm_inhibit_live = mcountinhibit_wr ? (register_value_nxt_i[i+4'd3] & HPM_WARL_MASK[i]) :
                                                         mcountinhibit_hpm_reg[i];
-            wire hpm_count_en     = hpm_event_pulse  & ~hpm_inhibit_live;
+            // stopcount_freeze_i (dcsr.stopcount in Debug Mode) freezes the count event;
+            // mhpmcounter_wr / mhpmcounterh_wr stay ungated so DM/SW writes still land.
+            wire hpm_count_en     = hpm_event_pulse  & ~hpm_inhibit_live & ~stopcount_freeze_i;
 
             // mhpmcounter low half
             wire        mhpmcounter_lo_en  = mhpmcounter_wr | hpm_count_en;
             wire [31:0] mhpmcounter_lo_nxt = mhpmcounter_wr ? register_value_nxt_i :
-                                                              (mhpmcounter_lo[i] + 1'b1);
+                                                              (mhpmcounter_lo[i] + 32'h00000001);
             arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_mhpmcounter_lo (
                                    .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(mhpmcounter_lo_en),
                                                                         .d_i (mhpmcounter_lo_nxt),
@@ -194,9 +197,15 @@ generate
             //     (old selector still active).
             // Acceptable trade-off: keeping mhpmevent combinational would extend the
             // 20-way event mux into the CSR write path's critical timing.
+            // WARL fold (stricter WARL, unmapped = no-event): any written selector above
+            // the highest implemented event (0x12) - including values with bits set above
+            // [4:0] - folds to 5'h00 on write, so a probing read-back shows 0 for every
+            // unimplemented selector. Implemented selectors (0x00-0x12) written verbatim.
+            wire        mhpmevent_unmapped = (|register_value_nxt_i[31:5]) | (register_value_nxt_i[4:0] > 5'h12);
+            wire  [4:0] mhpmevent_nxt      = mhpmevent_unmapped ? 5'h00 : register_value_nxt_i[4:0];
             arv_dff #(.WIDTH(5), .ARST_EN(ARST_EN)) u_mhpmevent (
                              .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(mhpmevent_wr),
-                                                                  .d_i (register_value_nxt_i[4:0]),
+                                                                  .d_i (mhpmevent_nxt),
                                                                   .q_o (mhpmevent_reg[i]));
 
             // Read data contribution for this counter
@@ -246,6 +255,7 @@ generate
         wire        disable_write_unused    = disable_write_i;
         wire  [9:0] core_events_unused      = core_events_i;
         wire  [7:0] platform_events_unused  = platform_events_i;
+        wire        stopcount_freeze_unused = stopcount_freeze_i;
 
         assign      hpm_rdata_o             = 32'h0;
         assign      mcounteren_hpm_o        =  8'h0;

@@ -45,7 +45,7 @@ reg [33:0] expected_data [0:MEM_SIZE-1];
 
 // Counters
 integer total_checks;
-integer checker_enabled;
+reg     checker_enabled;          // flag: 0/1 only
 integer num_entries_loaded;
 integer mismatch_count;  // Local counter to track when to stop simulation
 
@@ -133,11 +133,11 @@ end
 always @(posedge hclk_i) begin
     if (hresetn_i && id_instruction_valid_i && id_instruction_request_i && checker_enabled && checker_enable_i) begin
 
-        // Only check instructions fetched from ROM — SRAM addresses may hold
+        // Only check instructions fetched from ROM - SRAM addresses may hold
         // runtime-generated code (e.g. self-modifying code) that is not in
         // checker_data.mem, so silently skip them.
         if (id_pc_i < ROM_BASE_ADDR || id_pc_i >= (ROM_BASE_ADDR + ROM_SIZE_BYTES*2)) begin
-            // PC outside ROM range — skip
+            // PC outside ROM range - skip
         end else begin
 
         // Calculate memory index for current PC: subtract ROM base, then divide by 2 (half-word address)

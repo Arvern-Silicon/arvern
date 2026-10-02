@@ -101,6 +101,13 @@ trap_handler:
     la   t0, trap_handler
     csrw mtvec, t0
 
+    # Arm NMIE, then clear MDT, in that order. Both reset unfavourably (NMIE=0,
+    # MDT=1) and either one left alone makes every M-mode trap "unexpected", which
+    # diverts to the critical-error state instead of mtvec -- so a test whose whole
+    # purpose is to take a trap never reaches its checks.
+    csrsi 0x744, 8              # mnstatus.NMIE = 1
+    csrw  mstatush, x0          # Smdbltrp: MDT resets to 1
+
     # Initialize callee-saved registers (RV32E-safe markers in x0-x15)
     li   s0, 0xAAAAAAAA
     li   a0, 0xBBBBBBBB

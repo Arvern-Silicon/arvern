@@ -36,6 +36,8 @@
 #   0x38: phase6_mcounteren_0  — mcounteren readback after writing 0x0
 #----------------------------------------------------------------------------
 
+.include "firmware_config.inc"
+
 .section .text
 .global main
 
@@ -231,8 +233,12 @@ phase1_delay:
     # Bits [2:0] = {IR, TM, CY}: 0x7 enables all three, 0x0 disables all.
     # Test: write 0x7, read back (expect 0x7); write 0x0, read back (expect 0x0).
     # Restore 0x7 at the end.
+    #
+    # mcounteren exists only alongside U-mode, so the phase is skipped when
+    # SU_MODE_EN=0 (the CSR then raises an illegal instruction).
     #=================================================================
 
+.if CFG_SU_MODE_EN != 0
     li   t0, 0x7
     csrw MCOUNTEREN, t0              # write all 3 bits set
     csrr t0, MCOUNTEREN              # read back
@@ -247,6 +253,7 @@ phase1_delay:
 
     li   t0, 0x7
     csrw MCOUNTEREN, t0              # restore all bits
+.endif
 
     li   x31, 0x66666666             # Sync: phase 6 done
 
@@ -273,8 +280,11 @@ phase1_delay:
     # PHASE 8: mcounteren upper bits WARL — bits[31:11] must read 0
     # Write 0xFFFFFFFF to mcounteren; readback bits[31:11] must be 0
     # (unimplemented HPM counters above 10 are WARL hardwired to 0).
+    #
+    # Skipped when SU_MODE_EN=0, as in phase 6.
     #=================================================================
 
+.if CFG_SU_MODE_EN != 0
     li   t0, -1                      # 0xFFFFFFFF
     csrw MCOUNTEREN, t0              # attempt to set all 32 bits
     csrr t0, MCOUNTEREN              # read back: only bits [2:0] implemented
@@ -283,6 +293,7 @@ phase1_delay:
 
     li   t0, 0x7
     csrw MCOUNTEREN, t0              # restore to 0x7
+.endif
 
     li   x31, 0xdeadbeef             # Sync: all done
 

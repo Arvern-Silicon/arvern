@@ -85,9 +85,9 @@ initial
       coremark_per_mhz = coremark_per_sec / mclk_frequency;
 
       // Report results
-      $display("\INFO-VERILOG: CoreMark ticks      : %d",     periph0_reg_15_in);
-      $display("\INFO-VERILOG: CoreMark per second : %f",     coremark_per_sec);
-      $display("\INFO-VERILOG: CoreMark per MHz    : %f\n\n", coremark_per_mhz);
+      $display("\nINFO-VERILOG: CoreMark ticks      : %d",     periph0_reg_15_in);
+      $display("\nINFO-VERILOG: CoreMark per second : %f",     coremark_per_sec);
+      $display("\nINFO-VERILOG: CoreMark per MHz    : %f\n\n", coremark_per_mhz);
 
       //---------------------------------------
       // Wait for the end of C-code execution

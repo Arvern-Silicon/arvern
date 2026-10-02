@@ -32,7 +32,9 @@ module arv_uop_sequencer (
 
 // IRQ KILL
     input  wire           kill_i,
+    input  wire           kill_hold_i,          // IRQ/NMI kill requested: issue no new micro-op access
     output wire           is_killable_o,
+    output wire           kill_window_o,        // push/pop still has a killable load/store ahead
 
 // READY SIGNAL
     output wire           ex_uop_ready_o,
@@ -64,7 +66,7 @@ module arv_uop_sequencer (
     input  wire    [31:0] jvt_base_i,
     input  wire    [31:0] wb_ldst_data_i,
     input  wire           wb_ldst_wr_i,
-    input  wire           wb_excp_load_access_fault_i,
+    input  wire           wb_bus_error_load_i,
 
 // CM.JT / CM.JALT: TABLE JUMP OUTPUTS
     output wire    [31:0] ex_uop_jt_base_o,
@@ -101,6 +103,9 @@ wire                [3:0] uop_push_pop_state;
 wire               [15:0] uop_push_pop_1hot;
 
 wire                      uop_counter_wait;
+wire                      uop_in_kill_window;
+wire                      uop_aph_waited;
+wire                      uop_hold;
 wire                      uop_load_store_en;
 wire                      uop_sp_upd_active;
 wire                      uop_branch_active;
@@ -112,8 +117,6 @@ wire               [31:0] uop_ldst_imm_start;
 wire                      jt_load_active;
 wire                      jalt_alu_active;
 wire                      jt_done;
-wire                      jt_kill;
-wire                      jt_is_killable;
 wire                      jt_completed;
 wire                      jt_fault_exit;
 
@@ -166,29 +169,25 @@ assign      uop_alu_wait        = (~ex_alu_ready_i   & (uop_counter==4'h1)) ;
 assign      uop_ldst_wait       = (~ex_ldst_ready_i  & (uop_counter> 4'h1)) |
                                   (~wb_ldst_ready_i  & (uop_counter==4'h1)  & (ex_c_cm_popret | ex_c_cm_popretz)) |
                                   ( wb_dph_ongoing_i & (uop_counter==4'h1)  & (ex_c_cm_popret | ex_c_cm_popretz | ex_c_cm_pop)); // atomicity gate
-assign      uop_counter_wait    =   uop_ldst_wait    |  uop_alu_wait;
+assign      uop_counter_wait    =   uop_ldst_wait    |  uop_alu_wait     |  uop_hold;
 
-// Kill window: load/store phase with at least one more load/store remaining
-// after this cycle. Counter=2 is the LAST load/store of the sequence (its
-// DPH may still be in flight); counter=1 is the SP update; counter=0 is RET.
+// Kill window: the load/store phase, while a load/store is still to be issued
+// (counter >= 2). Counter=2 is the LAST load/store of the sequence (its DPH may
+// still be in flight); counter=1 is the SP update; counter=0 is RET.
 //
-// FEATURE REACHABILITY (AHB-Lite-safe by design):
-//   The pushpop IRQ-kill feature (`irqkill_uop_en`) is effectively unreachable
-//   under continuous back-to-back AHB-Lite traffic, because `is_killable_o`
-//   is further gated by `~wb_dph_ongoing_i` and `dph_ongoing` stays high
-//   across every APH cycle while transactions are pipelined. Kill therefore
-//   only fires when wait states inject an idle window (the bus reaches a
-//   beat between transactions). This is CORRECT AHB-Lite-safe behaviour:
-//   killing while a DPH is in flight would commit unintended data to a
-//   register and/or strand the bus. Worst-case IRQ latency on a long
-//   `cm.pop` under fast-SRAM is therefore the full natural duration of the
-//   sequence. Do NOT widen this gate without adding an explicit "wait for
-//   last in-flight DPH then kill" interlock -- the alternative is a
-//   protocol violation.
-wire        uop_in_kill_window  =  ex_pushpop_active & (uop_counter > 4'h2) & (uop_counter != 4'hf);
+// Kill interlock: once a kill is requested (kill_hold_i) the sequencer issues no
+// new access and freezes its counter, so the access already on the bus finishes
+// its data phase (AHB-Lite cannot cancel it) and is_killable_o rises one data
+// phase later. An access presented but not yet accepted (wait state) must stay
+// on the bus until accepted, so the hold only applies once it is. The window
+// covers every load/store still to be issued (counter >= 2): an IRQ/NMI latched
+// in the window drives the hold from the next cycle, when the counter may have
+// stepped once, and the access it would issue then must still be held.
+assign      uop_in_kill_window  =  ex_pushpop_active & (uop_counter > 4'h1) & (uop_counter != 4'hf);
+assign      uop_hold            =  kill_hold_i & uop_in_kill_window & ~uop_aph_waited;
 // AUDIT HOOK -- uop_kill defensive AND-term:
-//   kill_i is already gated upstream by is_killable_o (= uop_is_killable |
-//   jt_is_killable), and uop_is_killable already requires uop_in_kill_window.
+//   kill_i is already gated upstream by is_killable_o (= uop_is_killable), and
+//   uop_is_killable already requires uop_in_kill_window.
 //   So the AND here is redundant -- kill_i can only be 1 when
 //   uop_in_kill_window=1 anyway. The redundant gate is kept as a defensive
 //   belt against future widening of is_killable_o that might decouple it
@@ -197,8 +196,8 @@ wire        uop_kill            =  kill_i & uop_in_kill_window;
 
 wire  [3:0] uop_counter_nxt     = ~ex_pushpop_active            ? 4'hf             :
                                    uop_kill                     ? 4'hf             :
-                                  ~uop_counter_wait & uop_done  ? 4'hf             :
-                                  ~uop_counter_wait & uop_start ? uop_counter_init :
+                                 (~uop_counter_wait & uop_done) ? 4'hf             :
+                                 (~uop_counter_wait & uop_start)? uop_counter_init :
                                   ~uop_counter_wait             ? uop_counter_decr :
                                                                   uop_counter      ;
 
@@ -209,7 +208,10 @@ arv_dff #(.WIDTH(4), .RST_VAL(4'hf), .ARST_EN(ARST_EN)) u_uop_counter (
 assign      uop_push_pop_state  = uop_start ? ((ex_uop_rlist_i==4'hF) ? 4'hE : (ex_uop_rlist_i-4'h2)) : uop_counter;
 assign      uop_push_pop_1hot   = (16'h0001 << uop_push_pop_state);
 
-assign      uop_load_store_en   =  ex_pushpop_active    & (uop_counter>'h1)  & ~uop_kill;
+assign      uop_load_store_en   =  ex_pushpop_active    & (uop_counter>4'h1)  & ~uop_kill & ~uop_hold;
+
+arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_uop_aph_waited (
+                                  .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(uop_load_store_en & ~ex_ldst_ready_i), .q_o(uop_aph_waited));
 assign      uop_sp_upd_active   =  uop_push_pop_1hot[1] & ~(wb_dph_ongoing_i & uop_pop_variant) & ex_pushpop_active;
 assign      uop_branch_active   =  uop_push_pop_1hot[0];
 
@@ -285,7 +287,7 @@ arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_ex_uop_mv_phase (
 //////                                                                                                                      //////
 //////======================================================================================================================//////
 //////======================================================================================================================//////
-localparam JT_IDLE = 2'd0;   // Waiting for first cycle / address phase accepted
+localparam JT_IDLE = 2'd0;   // First cycle: issue the JVT load
 localparam JT_LOAD = 2'd1;   // Waiting for AHB address phase acceptance
 localparam JT_DPH  = 2'd2;   // Waiting for AHB data phase (load result)
 localparam JT_ALU  = 2'd3;   // Waiting for ALU (cm.jalt PC+2 computation)
@@ -293,12 +295,22 @@ localparam JT_ALU  = 2'd3;   // Waiting for ALU (cm.jalt PC+2 computation)
 generate
     if (ZCMT_EN) begin : WITH_ZMT
 
+        // TABLE JUMP FSM state -- declared up-front because the branch-active /
+        // branch-target capture qualifiers below sample it (FSM logic itself is
+        // in the "TABLE JUMP FSM" section further down).
+        wire  [1:0] jt_state;
+        reg   [1:0] jt_state_nxt;
+
         // Control to activate branch in decoder -- fires ONLY after JVT load data arrives.
-        // Setting on id_uop_start_i was premature: jt_branch_target=0 at that point, causing
-        // id_slow_branch_o to redirect fetch to address 0x00000000.
+        // (jt_state == JT_DPH) qualifier on set/capture: wb_ldst_wr_i strobes on
+        // ANY load write-back, so a back-to-back `lw; cm.jt` would capture the
+        // lw's DATA as branch target one load early. Entry to JT_DPH requires the
+        // JVT load's APH acceptance, which by AHB-Lite completes any older DPH on
+        // that same cycle -- so in JT_DPH the only possible strobe is the JVT
+        // load itself (the FSM below still exits JT_DPH on that strobe).
         wire        jt_branch_active;
-        wire        jt_branch_active_clr = (~ex_uop_enable_i | jt_done | jt_kill);    // clear takes priority
-        wire        jt_branch_active_set = (wb_ldst_wr_i & ex_jt_active);             // set only when load data valid
+        wire        jt_branch_active_clr = (~ex_uop_enable_i | jt_done);                           // clear takes priority
+        wire        jt_branch_active_set = (wb_ldst_wr_i & ex_jt_active & (jt_state == JT_DPH));   // set only when the JVT load data is valid
         wire        jt_branch_active_en  =  jt_branch_active_clr | jt_branch_active_set;
         wire        jt_branch_active_nxt =  jt_branch_active_clr ? 1'b0 : 1'b1;
 
@@ -309,7 +321,7 @@ generate
 
         // Prevents the JT FSM from restarting while decode stall holds ex_uop_enable_i high.
         wire        jt_completed_r;
-        wire        jt_completed_clr = (~ex_uop_enable_i | jt_kill);
+        wire        jt_completed_clr = ~ex_uop_enable_i;
         wire        jt_completed_en  =  jt_completed_clr | jt_done;
         wire        jt_completed_nxt =  jt_completed_clr ? 1'b0 : 1'b1;
 
@@ -320,10 +332,11 @@ generate
         assign jt_completed = jt_completed_r;
 
 
-        // Capture load result when it arrives (this is the target of the branch)
+        // Capture load result when it arrives (this is the target of the branch).
+        // (jt_state == JT_DPH): see the set/capture qualifier comment above.
         wire [31:0] jt_branch_target;
         wire        jt_branch_target_clr = (~ex_jt_active | jt_done);
-        wire        jt_branch_target_en  =  jt_branch_target_clr | wb_ldst_wr_i;
+        wire        jt_branch_target_en  =  jt_branch_target_clr | (wb_ldst_wr_i & (jt_state == JT_DPH));
         wire [31:0] jt_branch_target_nxt =  jt_branch_target_clr ? 32'h0 : wb_ldst_data_i;
 
         arv_dff #(.WIDTH(32), .ARST_EN(ARST_EN)) u_jt_branch_target (
@@ -331,34 +344,40 @@ generate
                                                                      .d_i (jt_branch_target_nxt),
                                                                      .q_o (jt_branch_target));
 
-        // TABLE JUMP FSM
-        wire  [1:0] jt_state;
-        reg   [1:0] jt_state_nxt;
+        // TABLE JUMP FSM (state declared at the top of this generate block)
         always @(*) begin
             jt_state_nxt = jt_state;                                                                                  // default: hold
-            if (~ex_jt_active | jt_kill)                      jt_state_nxt     = JT_IDLE;
+            if (~ex_jt_active)                                jt_state_nxt     = JT_IDLE;
             else begin
                 case (jt_state)
-                    JT_IDLE: if (!jt_completed)               jt_state_nxt     = ex_ldst_ready_i ? JT_DPH : JT_LOAD; // First cycle: if AHB accepts immediately -> JT_DPH, else -> JT_LOAD
-                    JT_LOAD: if (ex_ldst_ready_i)             jt_state_nxt     = JT_DPH;                             // Wait for AHB address phase
-                    JT_DPH:  if (wb_excp_load_access_fault_i) jt_state_nxt     = JT_IDLE;                            // JVT load faulted: trap will fire (MCAUSE=5), bail out
-                             else if (wb_ldst_wr_i)           jt_state_nxt     = JT_ALU;                             // cm.jalt -> JT_ALU, cm.jt -> done
-                    JT_ALU:  if (ex_alu_ready_i | ex_c_cm_jt) jt_state_nxt     = JT_IDLE;                            // cm.jalt -> ALU computed PC+2 done, cm.jt -> done
+                    JT_IDLE:   if (!jt_completed)               jt_state_nxt     = ex_ldst_ready_i ? JT_DPH : JT_LOAD; // First cycle: AHB accepts -> JT_DPH, else JT_LOAD. !jt_completed unreachable: jt_done forces the uop reload
+                               else                             jt_state_nxt     = jt_state;
+                    JT_LOAD:   if (ex_ldst_ready_i)             jt_state_nxt     = JT_DPH;                             // Wait for AHB address phase
+                               else                             jt_state_nxt     = jt_state;
+                    JT_DPH:    if (wb_bus_error_load_i)         jt_state_nxt     = JT_IDLE;                            // JVT load faulted: trap will fire (MCAUSE=5), bail out
+                               else if (wb_ldst_wr_i)           jt_state_nxt     = JT_ALU;                             // cm.jalt -> JT_ALU, cm.jt -> done
+                               else                             jt_state_nxt     = jt_state;
+          default /*JT_ALU*/:  if (ex_alu_ready_i | ex_c_cm_jt) jt_state_nxt     = JT_IDLE;                            // cm.jalt -> ALU computed PC+2 done, cm.jt -> done
+                               else                             jt_state_nxt     = jt_state;
                 endcase
             end
         end
         arv_dff #(.WIDTH(2), .RST_VAL(JT_IDLE), .ARST_EN(ARST_EN)) u_jt_state (
                                           .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(jt_state_nxt), .q_o(jt_state));
 
-        // Kill JT/JALT: safe during address phase (states 0,1) before load data arrives
-        assign jt_kill                   = kill_i & ex_jt_active & (jt_state <= JT_LOAD);
 
         // JVT-load access-fault exit: lets ex_uop_ready_o pulse so the UOP control
         // flop clears and the pipeline drains the synchronous trap (MCAUSE=5).
-        assign jt_fault_exit             = wb_excp_load_access_fault_i & ex_jt_active & (jt_state == JT_DPH);
+        // The raw load error is enough here (arv_csr_traps uses the tagged wb_jt_load_error):
+        // entering JT_DPH needs the table read's APH accepted, which completes any older data
+        // phase, so in JT_DPH the only load that can error is the table read itself.
+        assign jt_fault_exit             = wb_bus_error_load_i & ex_jt_active & (jt_state == JT_DPH);
 
         // Some utilities
-        assign jt_load_active            =  ex_jt_active & ((jt_state == JT_LOAD) |  (jt_state == JT_IDLE));
+        // A table jump is never killed: an IRQ/NMI waits for it to complete (arv_csr_traps).
+        // ~jt_completed is defensive: keeps a dead load request off the bus if a
+        // decode stall holds ex_uop_enable_i high after completion.
+        assign jt_load_active            =  ex_jt_active & ((jt_state == JT_LOAD) |  (jt_state == JT_IDLE)) & ~jt_completed;
         assign jalt_alu_active           =  ex_c_cm_jalt &  (jt_state == JT_ALU)  ;                                   // ALU activates 1 cycle after load data (registered JT_ALU state)
         assign jt_done                   =  ex_jt_active &  (jt_state == JT_ALU)  & (ex_alu_ready_i | ex_c_cm_jt);    // cm.jalt: done when ALU ready
 
@@ -368,20 +387,16 @@ generate
         assign ex_uop_jt_branch_active_o =  jt_branch_active;
         assign ex_uop_jt_active_o        =  ex_jt_active;
 
-        // JT/JALT killable during address phase (states 0,1) when no DPH in flight
-        assign jt_is_killable            =  ex_jt_active & (jt_state <= JT_LOAD) & !wb_dph_ongoing_i;
 
         // Lint
         wire [5:0] jvt_base_unused       = jvt_base_i[5:0];
 
     end else begin : NO_ZMT
 
-        assign jt_kill                   =  1'b0;
         assign jt_load_active            =  1'b0;
         assign jalt_alu_active           =  1'b0;
         assign jt_done                   =  1'b0;
         assign jt_completed              =  1'b0;
-        assign jt_is_killable            =  1'b0;
         assign jt_fault_exit             =  1'b0;
 
         assign ex_uop_jt_base_o          = 32'h00000000;
@@ -390,10 +405,10 @@ generate
         assign ex_uop_jt_active_o        =  1'b0;
 
         // Lint
-        wire [31:0] jvt_base_unused                    = jvt_base_i;
-        wire [31:0] wb_ldst_data_i_unused              = wb_ldst_data_i;
-        wire        wb_ldst_wr_i_unused                = wb_ldst_wr_i;
-        wire        wb_excp_load_access_fault_i_unused = wb_excp_load_access_fault_i;
+        wire [31:0] jvt_base_unused            = jvt_base_i;
+        wire [31:0] wb_ldst_data_i_unused      = wb_ldst_data_i;
+        wire        wb_ldst_wr_i_unused        = wb_ldst_wr_i;
+        wire        wb_bus_error_load_i_unused = wb_bus_error_load_i;
 
     end
 endgenerate
@@ -471,11 +486,12 @@ assign     ex_uop_a0_zero_en_o   = ( ex_c_cm_popretz & uop_branch_active);
 assign     ex_uop_mv_dest_ctrl_o = (~ex_uop_mv_phase & ex_mv_active);
 
 
-assign     ex_uop_ready_o        = (~ex_uop_enable_i | uop_done | ex_mv_done | jt_done | jt_completed | uop_kill | jt_kill | jt_fault_exit);
+assign     ex_uop_ready_o        = (~ex_uop_enable_i | uop_done | ex_mv_done | jt_done | jt_completed | uop_kill | jt_fault_exit);
 
 // UOP killable: pushpop in the safe kill window AND no DPH in flight.
 wire       uop_is_killable       = uop_in_kill_window & !wb_dph_ongoing_i;
-assign     is_killable_o         = uop_is_killable | jt_is_killable;
+assign     is_killable_o         = uop_is_killable;
+assign     kill_window_o         = uop_in_kill_window;
 
 wire       uop_push_pop_1hot_unused = uop_push_pop_1hot[15];
 
