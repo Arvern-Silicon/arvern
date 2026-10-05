@@ -102,6 +102,9 @@ module  arv_csr_traps (
     input  wire           ex_uop_ready_i,
     input  wire           ex_uop_take_branch_i,
     input  wire           id_instruction_valid_i,
+    input  wire           ex_ldst_valid_i,        // a load/store is in EX (it will have a data phase)
+    input  wire           wb_dph_ongoing_i,       // a load/store data phase is in progress
+    output wire           ex_ip_wr_wait_o,        // a mip/sip write is held in EX (CSR not ready)
     input  wire           wb_ldst_ready_i,
 
 // PIPELINE MONITORING & CONTROL IN CASE OF TRAP
@@ -169,6 +172,7 @@ module  arv_csr_traps (
     output wire    [31:0] dm_csr_rdata_o,
     output wire           debug_mode_o,
     output wire           debug_halt_active_o,
+    output wire           debug_halt_preempt_o,
     output wire           debug_issue_hold_o,          // EARLY flop-sourced issue hold for decode (see arv_csr_debug)
     output wire           debug_ebreak_cfg_o,          // dcsr.ebreak* enable for the current privilege (see arv_csr_debug)
     output wire           debug_halted_o,
@@ -325,6 +329,7 @@ wire  [31:0] stval_stval;
 
 wire  [31:0] mip;
 wire         mip_sel;
+wire         ip_wr_wait;            // mip/sip write held in EX while a load/store data phase is in progress
 wire         mip_wr;
 wire         mip_msip;
 wire         mip_mtip;
@@ -534,6 +539,7 @@ if (DEBUG_EN) begin : g_debug
 // Debug-mode status / control to the rest of the core
         .debug_mode_o            ( dbg_mode               ),
         .debug_halt_active_o     ( dbg_halt_active        ),
+        .debug_halt_preempt_o    ( debug_halt_preempt_o   ),
         .debug_issue_hold_o      ( debug_issue_hold_o     ),
         .debug_ebreak_cfg_o      ( debug_ebreak_cfg_o     ),
         .debug_resume_redirect_o ( dbg_resume_redirect    ),
@@ -552,9 +558,10 @@ if (DEBUG_EN) begin : g_debug
     assign      debug_halt_active_o         = dbg_halt_active;
 
     // Drain-qualified halted status reported to the Debug Module: Debug Mode AND the
-    // pipeline has drained (no in-flight MUL/DIV/load/CSR/UOP writeback, and no
-    // non-killable cm.jt/cm.jalt AHB phase) AND dpc has been captured for this halt.
-    assign      debug_halted_o              = dbg_halted_raw & pipeline_drained_for_id & ~ex_uop_jt_active_i & dbg_dpc_valid;
+    // pipeline has drained (no in-flight MUL/DIV/load/CSR/UOP writeback, no load/store
+    // still in EX -- its address phase may be issuing, with the data phase to follow --
+    // and no non-killable cm.jt/cm.jalt AHB phase) AND dpc has been captured for this halt.
+    assign      debug_halted_o              = dbg_halted_raw & pipeline_drained_for_id & ~ex_ldst_valid_i & ~ex_uop_jt_active_i & dbg_dpc_valid;
 
 end else begin : g_no_debug
 
@@ -571,6 +578,7 @@ end else begin : g_no_debug
     assign      dbg_step_no_irq             =  1'b0;
     assign      debug_mode_o                =  1'b0;
     assign      debug_halt_active_o         =  1'b0;
+    assign      debug_halt_preempt_o        =  1'b0;
     assign      debug_halted_o              =  1'b0;
     assign      debug_stopcount_o           =  1'b0;
     assign      debug_stoptime_o            =  1'b0;
@@ -1027,7 +1035,7 @@ assign       sscratch_wr    =  (sscratch_sel         & ~disable_write_i) & SU_MO
 assign       sepc_wr        =  (sepc_sel             & ~disable_write_i) & SU_MODE_EN;  // absent (illegal-instruction) when SU_MODE_EN=0
 assign       scause_wr      =  (scause_sel           & ~disable_write_i) & SU_MODE_EN;  // absent (illegal-instruction) when SU_MODE_EN=0
 assign       stval_wr       =  (stval_sel            & ~disable_write_i) & SU_MODE_EN;  // absent (illegal-instruction) when SU_MODE_EN=0
-assign       sip_wr         =  (sip_sel              & ~disable_write_i) & SU_MODE_EN;  // absent (illegal-instruction) when SU_MODE_EN=0
+assign       sip_wr         =  (sip_sel              & ~disable_write_i) & SU_MODE_EN & ~ip_wr_wait;  // absent (illegal-instruction) when SU_MODE_EN=0
 
 //
 //  SSCRATCH (0x140 : Supervisor scratch register)
@@ -1163,7 +1171,13 @@ assign       mscratch_wr    =  (mscratch_sel         & ~disable_write_i);
 assign       mepc_wr        =  (mepc_sel             & ~disable_write_i);
 assign       mcause_wr      =  (mcause_sel           & ~disable_write_i);
 assign       mtval_wr       =  (mtval_sel            & ~disable_write_i);
-assign       mip_wr         =  (mip_sel              & ~disable_write_i);
+assign       mip_wr         =  (mip_sel              & ~disable_write_i) & ~ip_wr_wait;
+
+// A mip/sip write waits for the data phase of an older load/store: a store that clears a
+// device's interrupt has then reached it, so the write sees the line low (the registered
+// copy of the line is ignored for a bit being cleared, see ip_pip_nxt).
+assign       ip_wr_wait     =  ((mip_sel | (sip_sel & SU_MODE_EN)) & ~disable_write_i) & wb_dph_ongoing_i;
+assign       ex_ip_wr_wait_o =  ip_wr_wait;
 //assign     mtinst_wr      =  (mtinst_sel           & ~disable_write_i);
 assign       mtval2_wr      =  (mtval2_sel           & ~disable_write_i);   // storage in g_ssdbltrp (read-only zero when SU_MODE_EN=0)
 
@@ -1296,9 +1310,16 @@ assign mip_meip = irq_m_external_r;
 // Deliberately latched, NOT pure level-sensitive (unlike MSIP/MTIP/MEIP above which directly assign irq_*_r).
 // The asymmetry with MSIP/MTIP/MEIP is intentional - those wire to known level-sensitive sources (CLINT/PLIC)
 // while the 16 platform IRQs are generic and must tolerate both source models.
-wire [15:0] ip_pip_nxt = mip_wr ?  (register_value_nxt_i[31:16] | irq_platform_r)                                          :
-                         sip_wr ? ((register_value_nxt_i[31:16] & mideleg_dpu) | (ip_pip & ~mideleg_dpu) | irq_platform_r) :
-                                  (ip_pip | irq_platform_r);
+// A bit software clears (1 -> 0) is not re-set by the registered request once its pin is low:
+// irq_platform_r still holds the request the bit already latched.
+wire [15:0] ip_pip_wr_clr    = mip_wr ? (ip_pip & ~register_value_nxt_i[31:16])               :
+                               sip_wr ? (ip_pip & ~register_value_nxt_i[31:16] & mideleg_dpu) :
+                                        16'h0000;
+wire [15:0] irq_platform_set = irq_platform_r & ~(ip_pip_wr_clr & ~irq_platform_i);
+
+wire [15:0] ip_pip_nxt = mip_wr ?  (register_value_nxt_i[31:16] | irq_platform_set)                                          :
+                         sip_wr ? ((register_value_nxt_i[31:16] & mideleg_dpu) | (ip_pip & ~mideleg_dpu) | irq_platform_set) :
+                                  (ip_pip | irq_platform_set);
 arv_dff #(.WIDTH(16), .ARST_EN(ARST_EN)) u_ip_pip (
               .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(ip_pip_nxt), .q_o(ip_pip));
 
@@ -2164,8 +2185,29 @@ assign nmi_suppress_post_mnret = nmi_suppress_post_mnret_reg;
 // NOT gated by NMIE: waking without taking the IRQ is spec-legal and avoids a
 // sleep-forever hazard on WFI inside the RNMI handler; the level-held IRQ is taken
 // after mnret.
+// Interrupt re-enable (xRET, IRQ-configuring CSR write): an older load/store still in flight
+// may be the access that clears a level source. The device drops its line when the access
+// completes and irq_*_r follows one cycle later, so no IRQ is taken before the older access
+// has completed, plus that cycle. At most one older access is in flight: an xRET issues only
+// when EX is ready, i.e. with HREADY high, which completes any older data phase in the cycle
+// the EX access is accepted; a CSR write has no access in EX. Younger accesses are not waited
+// for; the next completion or an idle LSU clears the wait.
+wire       wb_dph_done          = wb_dph_ongoing_i & wb_ldst_ready_i;
+wire       irq_reenable         = mret_taken | sret_taken | mnret_taken | csr_irq_config_wr;
+wire       irq_older_open;
+wire       irq_older_last;
+wire       irq_lsu_quiet        = ~wb_dph_ongoing_i & ~ex_ldst_valid_i;
+wire       irq_older_open_nxt   = irq_reenable                ? (ex_ldst_valid_i | (wb_dph_ongoing_i & ~wb_dph_done)) :
+                                  (irq_lsu_quiet | wb_dph_done) ? 1'b0                                                 :
+                                                                  irq_older_open;
+wire       irq_older_last_nxt   = wb_dph_done & (irq_reenable | irq_older_open);
+arv_dff #(.ARST_EN(ARST_EN)) u_irq_older_open (
+              .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(irq_older_open_nxt), .q_o(irq_older_open));
+arv_dff #(.ARST_EN(ARST_EN)) u_irq_older_last (
+              .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(irq_older_last_nxt), .q_o(irq_older_last));
+
 assign   irq_detect        = |(irq_vector_cause) & ~csr_irq_config_wr & ~irq_suppress_post_mret & ~dbg_step_no_irq
-                                                 &  mnstatus_nmie;
+                                                 &  mnstatus_nmie & ~irq_older_open & ~irq_older_last;
 // Ssdbltrp double-trap redirect for INTERRUPTS: same mechanism as the exception pair
 // above -- an interrupt whose delegation routing targets S-mode while SDT=1 & DTE=1 is
 // re-routed to M-mode as a double trap (mcause=16, interrupt bit 0, code in mtval2).
@@ -2611,7 +2653,8 @@ assign   wfi_wakeup_live_o    = (marv_ctl_i[3]                                 )
                                 (irq_m_external_i   & mie_meie                 )  |
                                 (irq_s_external_i   & sie_seie                 )  |
                                 (sip_seip_sw        & sie_seie                 )  |
-                                (|(irq_platform_i   & mie_mpie                ))  |
+                                (|(irq_platform_i   & ~ip_pip                 ))  |  // not masked by mie: a pulse must reach ip_pip (sticky even when disabled),
+                                (|(irq_platform_r   & ~ip_pip                 ))  |  // second gated edge latches it, then the clock gates again
                                 (|(ip_pip           & mie_mpie                ))  |
                                 (nmi_i & mnstatus_nmie & ~nmi_suppress_post_mnret) |
                                 ((bus_error_pulse | nmi_bus_pending)

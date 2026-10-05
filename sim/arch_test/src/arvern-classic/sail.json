@@ -301,7 +301,7 @@
     // Note marchid in particular: the UDB value is 0x36, which is 54 here, not 36.
     "vendorid": 2299,  // 0x000008FB = (JEDEC bank 0x11 << 7) | 0x7B
     "archid": 54,      // 0x36, allocated to aRVern by RISC-V International
-    "impid": 16777216, // 0x01000000 = RTL_VERSION v1.0.0 in [31:8]; must track arvern-classic.yaml IMP_ID_VALUE
+    "impid": 16777472, // 0x01000100 = RTL_VERSION v1.0.1 in [31:8]; must track arvern-classic.yaml IMP_ID_VALUE
     "hartid": 0,
     // Cache block size, specified as a power of 2.
     "cache_block_size_exp": 6,

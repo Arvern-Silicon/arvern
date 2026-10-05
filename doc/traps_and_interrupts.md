@@ -134,7 +134,11 @@ retire (locked by `inst_zicntr_instret_excp`; see
 
 The standard RISC-V interrupt-pending / interrupt-enable bits. The M-mode bits
 (causes 3 / 7 / 11) are levels: they remain pending as long as the external
-signal is asserted. See §4 for the latched platform bits.
+signal is asserted. A handler clears the source in the device before `mret`; the
+clearing store may still be in flight when `mret` (or a CSR write that enables
+the interrupt) takes effect, and no interrupt is taken until the loads and
+stores issued before it have completed, so the cleared source is not taken
+again. See §4 for the latched platform bits.
 
 | MIP bit | Cause | Name | Source |
 |--------:|------:|---|---|
@@ -177,7 +181,9 @@ The pending bits are **latched, not level**: a pulse or level on
 `irq_platform_i` sets the bit, and it stays set until software writes it to 0
 via `mip` (or `sip` for a delegated bit). A write cannot clear a bit whose pin
 is still high, and software can set a bit by writing 1. The handler must clear
-the source and then the bit.
+the source and then the bit. With a pulse source, pulses that arrive while the
+bit is pending — up to the cycle before the write that clears it — are one
+interrupt: the handler finds every event in the device.
 
 Pin timing and clock-domain crossing: [`integration_guide.md` §5.2](integration_guide.md#52-platform-interrupts).
 

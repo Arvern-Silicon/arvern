@@ -150,6 +150,7 @@ parameter                 ZBC_EN       =  1'b0;      // Zbc extension enable (ca
 parameter                 MUL_EN       =  1'b0;      // Multiply enabled (Zmmul or M) - required for C.MUL
 parameter                 DIV_EN       =  1'b0;      // Divide enabled (M extension only) - DIV/DIVU/REM/REMU
 parameter           [4:0] PMP_NR       =  5'd0;      // PMP entries (0 = no PMP): gates the PMP-CSR refetch below
+parameter                 TRIGGER_EN   =  1'b0;      // Sdtrig present: gates the trigger-CSR issue stall below
 //--------------------------------------------------------------------------------------------------------------
 parameter                 SU_MODE_EN   =  1'b1;      // S+U privilege modes (0=M-only; 1=M+S+U)
 parameter                 ZIHPM_NR     =  0;         // Zihpm: number of HPM counters (0-8)
@@ -1403,21 +1404,44 @@ wire         id_slow_fence_i         = id_instruction_request_o & id_instruction
 // cannot have dispatched). The fetch-side check runs at the data phase, after the
 // write has committed, so every refetched parcel sees the new configuration --
 // and nothing is added to the inst_hrdata -> inst_haddr loop.
+//
+// A trigger CSR write (0x7A0-0x7A7) stalls the ID slot for the same cycle, without the
+// refetch: the instruction after it is matched against the written trigger state
+// (execute triggers match at ID, while the write lands at the end of its EX cycle).
+// Both share one flop so the stall NORs keep a single flop-sourced leg.
 wire         ex_pmp_csr_wr;
+wire         ex_csr_wr_stall;
+// Only an op that writes: csrrw/csrrwi always do, csrrs/csrrc(i) only with rs1/uimm != 0.
+wire         id_csr_writes           = ~id_funct3[1] | (id_instruction_i[19:15] != 5'h00);
+wire         id_csr_wr_dispatch      = id_dispatch & id_instruction_valid_i & id_opcode_csr & id_csr_writes;
+wire         id_csr_pmp_wr_nxt;
+wire         id_csr_trig_wr_nxt;
 generate
     if (PMP_NR != 5'd0) begin : g_pmp_refetch
         wire   id_csr_pmp_addr   = ((id_instruction_i[31:24] >= 8'h3A)   & (id_instruction_i[31:24] <= 8'h3E) ) |
                                     (id_instruction_i[31:20] == 12'h747) | (id_instruction_i[31:20] == 12'h757) ;
-        // Only an op that writes: csrrw/csrrwi always do, csrrs/csrrc(i) only with rs1/uimm != 0.
-        wire   id_csr_writes     = ~id_funct3[1] | (id_instruction_i[19:15] != 5'h00);
-        wire   id_csr_pmp_wr_nxt = id_dispatch & id_instruction_valid_i & id_opcode_csr & id_csr_pmp_addr & id_csr_writes;
+        assign id_csr_pmp_wr_nxt = id_csr_wr_dispatch & id_csr_pmp_addr;
         arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_ex_pmp_csr_wr (
                               .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(id_csr_pmp_wr_nxt), .q_o(ex_pmp_csr_wr));
     end else begin : g_no_pmp_refetch
-        assign ex_pmp_csr_wr = 1'b0;
+        assign id_csr_pmp_wr_nxt = 1'b0;
+        assign ex_pmp_csr_wr     = 1'b0;
+    end
+    if (TRIGGER_EN) begin : g_trig_csr_stall
+        assign id_csr_trig_wr_nxt = id_csr_wr_dispatch & (id_instruction_i[31:23] == 9'b0111_1010_0);
+    end else begin : g_no_trig_csr_stall
+        assign id_csr_trig_wr_nxt = 1'b0;
+    end
+    if ((PMP_NR != 5'd0) | TRIGGER_EN) begin : g_csr_wr_stall
+        arv_dff #(.WIDTH(1), .ARST_EN(ARST_EN)) u_ex_csr_wr_stall (
+                              .clk_i(hclk_i), .rst_n_i(hresetn_i), .en_i(1'b1), .d_i(id_csr_pmp_wr_nxt | id_csr_trig_wr_nxt), .q_o(ex_csr_wr_stall));
+    end else begin : g_no_csr_wr_stall
+        assign ex_csr_wr_stall = 1'b0;
+        wire   id_csr_wr_dispatch_unused = id_csr_wr_dispatch;
+        wire   id_csr_wr_nxt_unused      = id_csr_pmp_wr_nxt | id_csr_trig_wr_nxt;
     end
 endgenerate
-assign       fetch_stall_from_pmp_wr = ex_pmp_csr_wr;
+assign       fetch_stall_from_pmp_wr = ex_csr_wr_stall;
 assign       ex_pmp_refetch_o        = ex_pmp_csr_wr;
 wire         id_slow_pmp_csr         = ex_pmp_csr_wr & ~trap_branch_detect_i;   // a trap redirect in the same cycle wins (it flushes too)
 wire         id_slow_refetch         = id_slow_fence_i | id_slow_pmp_csr;

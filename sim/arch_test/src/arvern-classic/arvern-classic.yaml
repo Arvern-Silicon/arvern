@@ -88,11 +88,11 @@ params:
   VENDOR_ID_BANK: 0x11
   VENDOR_ID_OFFSET: 0x7B
   # mimpid is a pure version register: {major, minor, patch} in [31:8], [7:0]
-  # reserved zero (arv_csr_ids.v). RTL_VERSION = 24'h010000 -> v1.0.0. The build
+  # reserved zero (arv_csr_ids.v). RTL_VERSION = 24'h010001 -> v1.0.1. The build
   # configuration is NOT here -- it lives in marv_cfg (0xFFF), a custom CSR the
   # suite does not read. Same value for every persona; bump it when RTL_VERSION
   # moves, or Sm_mcsr-00 fails.
-  IMP_ID_VALUE: 0x01000000
+  IMP_ID_VALUE: 0x01000100
 
   # MTVEC (VERIFIED -- arv_csr_traps.v:920 stores {1'b0, wdata[0]}, so MODE is
   # WARL-narrowed to Direct/Vectored and a write of 2 or 3 lands as 0 or 1)

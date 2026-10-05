@@ -509,6 +509,13 @@ on `irq_platform_i[n]` is remembered until software writes the bit to 0 through 
 pulse sources both work; the ISR must clear the bit (`csrc mip, …`) after the source has
 dropped.
 
+**Prefer a level held until software clears the device** for a new source: a status bit
+set by the event, `irq = status & enable`, cleared by a write. The pending bit cannot be
+cleared while the line is high, so a second event that arrives before the handler finishes
+re-raises the interrupt and is never lost. A pulse source must be at least one `hclk_i`
+cycle long; pulses that arrive while the bit is pending merge into one interrupt, so the
+handler has to read from the device how many events occurred.
+
 **CDC synchronization required.** `irq_platform_i` is fed directly into registered
 pipeline control logic without any synchronizer inside the core. If this signal
 originates from a clock domain other than `hclk_i`, it must be synchronized externaly.

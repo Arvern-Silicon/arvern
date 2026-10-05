@@ -268,8 +268,8 @@ Any address not listed reads 0. Single hart: `hartsel`/`hasel`/`hartreset` are R
 
 | Bits | Field | Access | Notes |
 |------|-------|--------|-------|
-| 31   | `haltreq`         | R/W (level) | drives the hart halt request |
-| 30   | `resumereq`       | W1          | resume handshake (self-clearing via `resumeack`); **ignored when `haltreq` is written 1 in the same access** (halt wins, per Debug Spec 1.0); a single write with `haltreq=0, resumereq=1` clears the halt request and resumes. Ignored if the hart is not (drain-qualified) halted. The hart-side resume is held off while an SBA transfer is in flight or an abstract command is starting/busy — the request stays latched and completes when the engine drains. |
+| 31   | `haltreq`         | W (level)   | drives the hart halt request; reads 0 |
+| 30   | `resumereq`       | W1          | resume handshake (self-clearing via `resumeack`); **ignored when `haltreq` is written 1 in the same access** (halt wins, per Debug Spec 1.0); a single write with `haltreq=0, resumereq=1` clears the halt request and resumes. The resume is ignored if the hart is not (drain-qualified) halted; the write still clears `resumeack`. The hart-side resume is held off while an SBA transfer is in flight or an abstract command is starting/busy — the request stays latched and completes when the engine drains. |
 | 28   | `ackhavereset`    | W1          | clears the sticky `havereset` |
 | 3    | `setresethaltreq` | W1          | request halt-on-reset (pair with bit 2); does not halt a running hart — it acts only at the next hart reset |
 | 2    | `clrresethaltreq` | W1          | clear halt-on-reset — **wins if both written** |
@@ -586,9 +586,7 @@ chained-trigger indicator, and chaining is unsupported).
 **Known gaps (documented, not bugs):** `tdata1.select=1` (data-**value** match) is not
 implemented — `select` WARL-coerces to 0 (address match). `chain` (multi-trigger
 range) is **WARL-0** — it always reads back 0 (chaining unsupported; each trigger
-evaluates independently). A software-written (`csrw`) trigger takes effect
-only after the write retires, so it cannot match the immediately-following
-instruction/access (a debugger arming via abstract access while halted is unaffected).
+evaluates independently).
 Privilege match uses the effective privilege, not the `MPRV`/`MPP`-effective privilege
 for loads/stores (identical when `MPRV=0`).
 

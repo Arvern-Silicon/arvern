@@ -10,6 +10,10 @@ bare-metal code targeting the aRVern core. It covers boot, ABI, the linker
 layout used by the tests, CSR-access conventions, and the firmware-side
 caveats called out in [`spec_compliance_notes.md`](spec_compliance_notes.md).
 
+Ready-made C code for the rules described here — CSR access, build discovery and a
+trap / interrupt layer — ships in [`sw/`](../sw/README.md), and the interrupt-related
+IPs have their own drivers; §14 shows how they fit together.
+
 For the full ISA / CSR reference, see
 [`arvern_instructions.md`](arvern_instructions.md).
 For traps and IRQs in depth, see
@@ -32,6 +36,7 @@ For traps and IRQs in depth, see
 11. [Counters (Zicntr / Zihpm)](#11-counters-zicntr--zihpm)
 12. [Physical Memory Protection (PMP / Smepmp)](#12-physical-memory-protection-pmp--smepmp)
 13. [RV32E Programming Notes](#13-rv32e-programming-notes)
+14. [C Support Library and IP Drivers](#14-c-support-library-and-ip-drivers)
 
 ---
 
@@ -421,7 +426,9 @@ All are present regardless of `CCSR_EN`; the rest of 0x7C0–0x7FF is RAZ/WI.
 
 Vectored mode (`mtvec[0] = 1`) puts **interrupts** at `mtvec_base + 4 × cause`;
 exceptions and double traps always take the direct entry. Direct mode
-(`mtvec[0] = 0`) sends everything to a single entry. A direct-mode handler:
+(`mtvec[0] = 0`) sends everything to a single entry. The support library's
+`arvern_trap.S` / `arvern_irq.c` (§14) implement such an entry with C dispatch; the
+skeleton below shows what one has to do. A direct-mode handler:
 
 ```asm
 .balign 4
@@ -868,9 +875,119 @@ carry `rv32e…` / `ilp32e`. See `simulation_guide.md` for the full flow.
 
 ---
 
+## 14. C Support Library and IP Drivers
+
+Bare-metal firmware does not have to start from the skeletons above. Two layers of C
+code ship with the core and the IPs:
+
+| Layer | Where | What it does |
+|---|---|---|
+| Core support library | [`arvern/sw/`](../sw/README.md) | CSR access and the aRVern CSR map (`arvern_csr.h`), build discovery from `marchid`, `misa` and `marv_cfg` (`arvern_cpu.h`), and the trap / interrupt layer (`arvern_irq.h`): one trap entry and one RNMI entry with per-cause C handlers, the Smdbltrp boot sequence (§2, [`traps_and_interrupts.md`](traps_and_interrupts.md)), default handlers for unhandled traps and data-bus errors (§9) |
+| IP drivers | `arvern-ips/<ip>/sw/` for [`ahb_aclint`](https://github.com/Arvern-Silicon/arvern-ips/tree/main/ahb_aclint/sw), [`ahb_plic`](https://github.com/Arvern-Silicon/arvern-ips/tree/main/ahb_plic/sw) and [`ahb_periph_example`](https://github.com/Arvern-Silicon/arvern-ips/tree/main/ahb_periph_example/sw) | Register map (`<ip>_regs.h`) and a driver for that IP: timer, software interrupts and delays; PLIC priorities, enables, claim / complete; the example peripheral's registers and delegation |
+
+The application owns the third piece, its **board support**: the base addresses, the
+IP parameters a driver cannot read from the hardware, and which interrupt line goes
+where (`irq_platform_i[n]`, PLIC source numbers).
+
+The layers are independent: an IP driver only touches its IP's registers and never
+includes the core library, and the core library knows no IP. All of it is C11, needs
+no `malloc` and no libc beyond the freestanding headers, and builds for RV32E. With
+`-ffunction-sections -fdata-sections -Wl,--gc-sections` an application pays only for
+what it calls.
+
+### Building
+
+Add the sources and include directories of the pieces the application uses:
+
+```make
+ARV_SW     = <path>/arvern/sw
+IPS        = <path>/arvern-ips
+SRCS      += $(ARV_SW)/src/arvern_trap.S $(ARV_SW)/src/arvern_irq.c \
+             $(IPS)/ahb_aclint/sw/src/ahb_aclint.c $(IPS)/ahb_plic/sw/src/ahb_plic.c
+CFLAGS    += -I$(ARV_SW)/include -I$(IPS)/ahb_aclint/sw/include -I$(IPS)/ahb_plic/sw/include \
+             -ffunction-sections -fdata-sections
+LDFLAGS   += -Wl,--gc-sections
+```
+
+`-march` / `-mabi` follow the core build (§1); the trap entry saves the RV32E or the
+RV32I register set according to them.
+
+### Putting them together
+
+The core library takes the trap and calls a C handler per cause; the handler uses the
+IP driver to service and clear the device. A timer tick through the ACLINT and an
+external interrupt through the PLIC:
+
+```c
+#include "arvern_irq.h"
+#include "ahb_aclint.h"
+#include "ahb_plic.h"
+
+static aclint_t clint;
+static plic_t   plic;
+static unsigned ctx_m;
+
+static void on_timer(uint32_t cause)              /* mip.MTIP: level, cleared by the device */
+{
+    (void) cause;
+    aclint_timer_set_rel(&clint, 0u, aclint_ms_to_ticks(&clint, 10u));
+}
+
+static void on_source(uint32_t src, void *arg)    /* one PLIC source */
+{
+    (void) arg;
+    (void) src;                                   /* service device 'src', drop its request line */
+}
+
+static void on_external(uint32_t cause)           /* mip.MEIP */
+{
+    (void) cause;
+    while (plic_dispatch(&plic, ctx_m, on_source, 0) > 0)
+        ;
+}
+
+int main(void)
+{
+    arv_irq_init();                               /* boot sequence, mtvec, marv_nmvec */
+
+    const aclint_config_t ccfg = { .base = 0x02000000u, .num_harts = 1u,
+                                   .sswi = false, .mtime_hz = 32768u };
+    const plic_config_t   pcfg = { .base = 0x0C000000u, .num_sources = 31u,
+                                   .num_harts = 1u, .prio_bits = 3u, .su_mode = false };
+    aclint_init(&clint, &ccfg);
+    plic_init(&plic, &pcfg);
+    plic_context(&plic, 0u, false, &ctx_m);
+    /* plic_set_priority() / plic_enable() for each source used */
+
+    arv_irq_attach(IRQ_M_TIMER, on_timer);
+    arv_irq_attach(IRQ_M_EXT,   on_external);
+    aclint_timer_set_rel(&clint, 0u, aclint_ms_to_ticks(&clint, 10u));
+    arv_irq_enable(IRQ_M_TIMER);
+    arv_irq_enable(IRQ_M_EXT);
+    arv_irq_global_enable();
+
+    for (;;)
+        arv_wfi();
+}
+```
+
+A device wired straight to `irq_platform_i[n]` instead of the PLIC is attached as cause
+`IRQ_PLATFORM(n)`. Its pending bit is latched: the handler clears the request in the
+device first, then calls `arv_irq_clear_pending(cause)` ([`traps_and_interrupts.md`](traps_and_interrupts.md)
+on platform interrupts).
+
+Handlers run with interrupts masked; the library does not nest. A data-bus error is
+resumed by the default RNMI handler, which records `marv_epc` / `marv_eaddr`
+(`arv_trap_last`); an application that replays or reports such errors attaches its own
+with `arv_nmi_attach()` (§9). The per-directory READMEs list every function and its
+behaviour.
+
+---
+
 ## See Also
 
 - [`integration_guide.md`](integration_guide.md) — pinout, reset / boot, AHB contract
 - [`traps_and_interrupts.md`](traps_and_interrupts.md) — full trap + IRQ details
 - [`arvern_instructions.md`](arvern_instructions.md) — ISA + CSR reference
 - [`spec_compliance_notes.md`](spec_compliance_notes.md) — every firmware-visible deviation
+- [`../sw/README.md`](../sw/README.md) — core support library

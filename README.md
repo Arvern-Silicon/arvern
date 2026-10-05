@@ -46,7 +46,7 @@ Everything beyond the base pipeline is a parameter. Out of the box `arvern.v` is
 
 ## Release notes
 
-Latest release: **1.0.0**. 
+Latest release: **1.0.1**. 
 
 What changed in each release, and how to upgrade: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -90,7 +90,7 @@ The RISC-V specification PDFs the documents cite are under [`doc/specs/`](doc/sp
 | Reader | Documents |
 |---|---|
 | **SoC integrator** — wiring the core into a chip or FPGA | [`doc/integration_guide.md`](doc/integration_guide.md) — parameters, ports, reset architecture, IRQ / NMI / CCSR / debug wiring · [`doc/memory_and_ahb.md`](doc/memory_and_ahb.md) — the AHB-Lite contract: transfer types, byte lanes, error responses, privilege encoding · [`doc/synthesis_guide.md`](doc/synthesis_guide.md) — the Design Compiler flow, constraints, DFT, per-persona and per-module area |
-| **Firmware developer** — bare-metal or RTOS code on the core | [`doc/software_guide.md`](doc/software_guide.md) — ABI, boot flow, linker layout, CSR idioms, trap-handler skeleton · [`doc/traps_and_interrupts.md`](doc/traps_and_interrupts.md) — exception causes, interrupt priority, delegation, NMI, double traps, WFI · [`doc/spec_compliance_notes.md`](doc/spec_compliance_notes.md) — the conformance result and every implementation-defined choice; read before shipping · [`doc/debug_interface.md`](doc/debug_interface.md) — hart-side debug CSRs and `ebreak` behaviour |
+| **Firmware developer** — bare-metal or RTOS code on the core | [`doc/software_guide.md`](doc/software_guide.md) — ABI, boot flow, linker layout, CSR idioms, trap-handler skeleton, and how the C support library and the IP drivers fit together · [`sw/README.md`](sw/README.md) — the C support library: CSR access, build discovery, trap / interrupt layer · [`doc/traps_and_interrupts.md`](doc/traps_and_interrupts.md) — exception causes, interrupt priority, delegation, NMI, double traps, WFI · [`doc/spec_compliance_notes.md`](doc/spec_compliance_notes.md) — the conformance result and every implementation-defined choice; read before shipping · [`doc/debug_interface.md`](doc/debug_interface.md) — hart-side debug CSRs and `ebreak` behaviour |
 | **Debug-tool / DTM author** — OpenOCD, probe or transport bring-up | [`doc/debug_interface.md`](doc/debug_interface.md) — DMI protocol, Debug Module register map, abstract commands, system bus access, Sdtrig |
 | **Verification contributor** — writing or running tests | [`doc/simulation_guide.md`](doc/simulation_guide.md) — prerequisites, the `run` scripts, waveforms, debug tooling · [`doc/verification_guide.md`](doc/verification_guide.md) — test conventions, the x31 sync mechanism, the test registry, regression policy · [`doc/asphalt_trace_format.md`](doc/asphalt_trace_format.md) — the per-instruction trace format · [`doc/benchmarking_guide.md`](doc/benchmarking_guide.md) — what the benchmarks measure and how to compare fairly · [`sim/arch_test/README.md`](sim/arch_test/README.md) — the riscv-arch-test flow |
 | **Core designer / reviewer** — modifying or auditing the RTL | [`doc/microarchitecture.md`](doc/microarchitecture.md) — block diagram, pipeline, decoder, CSR topology, critical paths · [`doc/arvern_instructions.md`](doc/arvern_instructions.md) — instruction inventory and full CSR map · [`doc/spec_compliance_notes.md`](doc/spec_compliance_notes.md) — why each deviation is legal and the audit hook that guards it |

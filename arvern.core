@@ -24,7 +24,7 @@ CAPI=2:
 #   fusesoc run --target=lint --setup arvern:cpu:arvern
 # ----------------------------------------------------------------------------
 
-name: arvern:cpu:arvern:1.0
+name: arvern:cpu:arvern:1.0.1
 description: "arvern RV32I/E CPU core (M, B, C extensions; S/M/U privilege; Smrnmi NMI; Zicntr/Zihpm counters; RISC-V Debug 1.0 external debug)."
 
 filesets:

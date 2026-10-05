@@ -67,7 +67,7 @@ initial begin
     // MIMPID is now a pure version register: {major, minor, patch, reserved}, one byte each.
     // The build configuration it used to carry moved to marv_cfg (0xFFF).
     // NOTE: keep in sync with the RTL_VERSION localparam in arvern.v -- bump together each release.
-    expected_mimpid = {24'h010000,  // [31: 8] : v1.0.0 -- {major[7:0], minor[7:0], patch[7:0]}
+    expected_mimpid = {24'h010001,  // [31: 8] : v1.0.1 -- {major[7:0], minor[7:0], patch[7:0]}
                        8'h00        // [ 7: 0] : reserved
                       };
 

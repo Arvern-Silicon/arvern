@@ -241,8 +241,11 @@ arv_dff_sinit #(.ARST_EN(ARST_EN)) u_resume_pending (
 // resume_pending_q stays latched, so the hart resumes as soon as the engine drains.
 assign      dm_resumereq_o     = resume_pending_q & ~sb_busy & ~busy_q & ~start_run;
 
-wire        resumeack_en       = resume_pending_set | resume_done;
-wire        resumeack_nxt      = resume_done;                        // set when done, cleared on new request
+// A resumereq write clears the ack whether or not the hart is halted (only the resume itself
+// needs a halted hart); ignored together with haltreq like the request.
+wire        resumeack_clr      = req_resume & ~dmi_pwdata_i[31];
+wire        resumeack_en       = resumeack_clr | resume_done;
+wire        resumeack_nxt      = resume_done & ~resumeack_clr;       // set when done, cleared on new request
 arv_dff_sinit #(.ARST_EN(ARST_EN)) u_resumeack (
           .clk_i(hclk_i), .rst_n_i(dbgresetn_i), .sinit_i(dm_sinit), .en_i(resumeack_en),
                                                                      .d_i (resumeack_nxt), .q_o(resumeack_q));

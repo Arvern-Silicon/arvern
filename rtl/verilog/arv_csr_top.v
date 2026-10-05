@@ -89,6 +89,7 @@ module  arv_csr_top (
     input  wire           ex_uop_ready_i,
     input  wire           ex_uop_take_branch_i,
     input  wire           id_instruction_valid_i,
+    input  wire           wb_dph_ongoing_i,
     input  wire           wb_ldst_ready_i,
 
 // PIPELINE MONITORING & CONTROL IN CASE OF TRAP
@@ -309,6 +310,8 @@ wire                      pmp_mml;
 wire                      pmp_mmwp;
 wire                      bank_trigger;
 wire                      debug_mode;
+wire                      debug_halt_preempt;
+wire                      ex_ip_wr_wait;
 
 // Sdtrig execute-trigger match/fire/action
 wire                      trigger_exec_match;
@@ -411,8 +414,9 @@ assign     ex_csr_reg_dest_wdata_o = ccsr_value_read        |
                                      trigger_value_read     |
                                      pmp_value_read         ;
 
-// CSR ready: stalled when waiting for time interface grant
-assign     ex_csr_ready_o          = counters_csr_ready;
+// CSR ready: stalled when waiting for time interface grant, or a mip/sip write waiting for
+// an older data phase
+assign     ex_csr_ready_o          = counters_csr_ready & ~ex_ip_wr_wait;
 
 
 //----------------------------------------------------------------------------------//
@@ -826,6 +830,9 @@ arv_csr_traps #(.ARST_EN     (ARST_EN   ),
     .ex_uop_ready_i                     ( ex_uop_ready_i                     ),
     .ex_uop_take_branch_i               ( ex_uop_take_branch_i               ),
     .id_instruction_valid_i             ( id_instruction_valid_i             ),
+    .ex_ldst_valid_i                    ( ex_is_load_i | ex_is_store_i       ),
+    .wb_dph_ongoing_i                   ( wb_dph_ongoing_i                   ),
+    .ex_ip_wr_wait_o                    ( ex_ip_wr_wait                      ),
     .wb_ldst_ready_i                    ( wb_ldst_ready_i                    ),
 
 // PIPELINE MONITORING & CONTROL IN CASE OF TRAP
@@ -895,6 +902,7 @@ arv_csr_traps #(.ARST_EN     (ARST_EN   ),
     .dm_csr_rdata_o                     ( dm_csr_rdata_o                     ),
     .debug_mode_o                       ( debug_mode                         ),
     .debug_halt_active_o                ( debug_halt_active_o                ),
+    .debug_halt_preempt_o               ( debug_halt_preempt                 ),
     .debug_issue_hold_o                 ( debug_issue_hold_o                 ),
     .debug_ebreak_cfg_o                 ( debug_ebreak_cfg_o                 ),
     .debug_halted_o                     ( debug_halted_o                     ),
@@ -1054,6 +1062,7 @@ generate
             .register_value_nxt_i    ( register_value_nxt       ),
             .disable_write_i         ( disable_write            ),
             .debug_mode_i            ( debug_mode               ),
+            .debug_halt_preempt_i    ( debug_halt_preempt       ),
 
             .id_pc_i                 ( id_pc_i                  ),
             .priv_mode_i             ( privilege_mode_effective ),
@@ -1087,6 +1096,7 @@ generate
 
         // Trigger absent: the mte-FSM taps from traps and the EX load/store taps have no consumer.
         wire        bank_trigger_unused    = bank_trigger;
+        wire        debug_halt_preempt_unused = debug_halt_preempt;
         wire        id_issue_active_unused = id_issue_active_nodbg_i;
         wire        trig_mte_taps_unused   = |{trig_m_trap_entry, trig_mret, trig_rnmi_entry, trig_mnret};
         wire        trig_ls_taps_unused    = |{ex_is_load_i, ex_is_store_i, ex_size_i};
@@ -1177,14 +1187,16 @@ assign marv_nmvec_value_read = ({32{marv_nmvec_sel}} & marv_nmvec);
 
 wire        bus_error_now     = wb_bus_error_load_i | wb_bus_error_store_i;
 wire        estat_valid;
-wire        estat_capture     = bus_error_now & ~estat_valid;   // first fault only
-wire        estat_overrun_set = bus_error_now &  estat_valid;   // a second one while unread
 
 // W1C from software: writing 1 to a bit clears it.
 wire        marv_estat_sel  = (register_select[62] & bank_marv_ctl);   // 0x7FE (same 0x7C0-0x7FF bank)
 wire        marv_estat_wr   = (marv_estat_sel      & ~disable_write);
 wire        estat_w1c_valid = marv_estat_wr & register_value_nxt[0];
 wire        estat_w1c_ovr   = marv_estat_wr & register_value_nxt[2];
+
+// First fault only; a fault in the cycle software clears valid is a new first fault
+wire        estat_capture     = bus_error_now & (~estat_valid | estat_w1c_valid);
+wire        estat_overrun_set = bus_error_now &   estat_valid & ~estat_w1c_valid;
 
 wire        estat_valid_en  = estat_capture | estat_w1c_valid;
 arv_dff #(.ARST_EN(ARST_EN)) u_estat_valid (

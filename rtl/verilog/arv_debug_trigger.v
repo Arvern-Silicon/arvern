@@ -40,6 +40,7 @@ module  arv_debug_trigger (
 
 // DEBUG MODE (whole-register dmode write-protection + match suppression while halted)
     input  wire                          debug_mode_i,              // hart is in Debug Mode (registered; frozen hart)
+    input  wire                          debug_halt_preempt_i,      // a higher-priority halt (haltreq / step / resethaltreq) is entered this cycle
 
 // MATCH-PATH HART STATE (execute trigger)
     input  wire                   [31:0] id_pc_i,                   // PC of the instruction at the id_pc boundary
@@ -393,7 +394,8 @@ generate
         // (writing 1 is also legal WARL). chain is unsupported so hit1 is tied 0.
         //
         // Set condition:
-        //   execute    : exec_match_or[t] & id_issue_active & ~debug_mode  (this trigger fires)
+        //   execute    : exec_match_or[t] & id_issue_active & ~debug_mode  (this trigger fires),
+        //                unless haltreq / step / resethaltreq halts the hart first (Debug 1.0 Table 8)
         //   load/store : ls_fire_or[t]                     & ~debug_mode  (this trigger fires)
         // whatever the action (Debug 1.0 mcontrol6 hit0: set when the trigger fires).
         //
@@ -404,8 +406,8 @@ generate
         // FLOP: enable on a debugger tdata1 write to this trigger (tdata1_we, already dmode-gated
         // via write_allowed) OR a HW action-fire. Next = fire ? 1 : wdata[22] -> a simultaneous
         // HW-set wins over a debugger clear. Reset 0.
-        wire        t_hit0_set = (exec_match_or[t]  & id_issue_active_nodbg_i & ~debug_mode_i) |
-                                 (ls_fire_or[t]                               & ~debug_mode_i) ;
+        wire        t_hit0_set = (exec_match_or[t]  & id_issue_active_nodbg_i & ~debug_halt_preempt_i & ~debug_mode_i) |
+                                 (ls_fire_or[t]                                                     & ~debug_mode_i) ;
 
         wire        hit0_en    = tdata1_we | t_hit0_set;
         wire        hit0_nxt   = t_hit0_set ? 1'b1 : register_value_nxt_i[22];

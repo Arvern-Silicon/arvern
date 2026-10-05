@@ -8,8 +8,64 @@ through `mimpid`) carries the same number.
 
 | Version | Date |
 |---|---|
+| [1.0.1](#v1.0.1) | Oct 5, 2026 |
 | [1.0.0](#v1.0.0) | Oct 2, 2026 |
 | [0.1.0-preview](#v0.1.0-preview) | Jun 24, 2026 |
+
+<a id="v1.0.1"></a>
+
+## 1.0.1
+
+Adds a C support library for firmware. Bug fixes. No port, parameter or CSR change.
+
+### Added
+
+- **`sw/`: core support library.** CSR access macros and the aRVern CSR map
+  (`arvern_csr.h`), build discovery from `marchid`, `misa` and `marv_cfg`
+  (`arvern_cpu.h`), and a trap / interrupt layer: one trap entry and one RNMI entry with
+  per-cause C handlers, the Smdbltrp boot sequence, and default handlers for unhandled traps
+  and data-bus errors (`arvern_irq.h`). The peripheral drivers live with their IPs in
+  `arvern-ips`.
+
+### Fixed
+
+- **Platform interrupts, pending clear.** A write clearing a `mip[31:16]` / `sip[31:16]` bit
+  was refused while the store that cleared the device was still in flight, or in the cycle
+  after its `irq_platform_i` line dropped, so the handler could be taken a second time. A
+  `mip` / `sip` write now waits for an older load or store to complete.
+- **Platform interrupts in WFI.** A one-cycle pulse on `irq_platform_i` arriving while the
+  core had gated its clock in WFI was lost: an enabled interrupt did not wake the hart, and a
+  disabled one never reached its pending bit.
+- **Level interrupts after a clearing access.** A handler that cleared its source with a store
+  and then executed `mret` (or set `mstatus.MIE` / `mie`) could take the interrupt again: the
+  store could still be in flight, and the core sees the line one cycle after the device drops
+  it. After an `mret` / `sret` / `mnret` or an interrupt-enabling CSR write, no interrupt is
+  now taken until the loads and stores issued before it have completed.
+- **`marv_estat`.** A data-bus error in the cycle software cleared `valid` was recorded as an
+  overrun with no evidence; it is now captured as a new first fault.
+- **Execute triggers.** A write to `tdata1`, `tdata2` or `tcontrol` was seen by the trigger
+  logic one instruction late: the instruction right after a disarm could still take a
+  breakpoint, and the one right after an arm was missed. The instruction after a trigger CSR
+  write now waits one cycle.
+- **`mcontrol6.hit0`** was set by an execute match that a halt request, a single step or a
+  reset-halt pre-empted (the trigger did not fire).
+- **Debug halt status.** The hart could report halted (`dmstatus.allhalted`, `haltsum0`) in
+  the cycle a load or store left EX, before that access had completed: under memory wait
+  states the status then dropped again for a few cycles, and an abstract command started in
+  that window could race the access. Halted is now reported once the access has completed.
+- **`dmstatus.allresumeack`.** A `resumereq` write to a hart that was not halted did not clear
+  the resume acknowledge.
+
+### Documentation
+
+- **Software guide §14** (`doc/software_guide.md`): how the support library, the IP
+  drivers of `arvern-ips` and the application's board support fit together, with a
+  build recipe and an example (ACLINT timer and PLIC external interrupt).
+
+### Upgrading from 1.0.0
+
+Drop-in replacement; `mimpid` reads `0x01000100`. The FuseSoC core is
+`arvern:cpu:arvern:1.0.1`.
 
 <a id="v1.0.0"></a>
 

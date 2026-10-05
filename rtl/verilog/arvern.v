@@ -327,7 +327,7 @@ localparam          [2:0] B_EXT_LEVEL_PROC         = (B_EXTENSION   <  0) ? 3'd0
 // PATCH when nothing did (RTL cleanup, lint fix, synthesis-only tweak). The arch-test
 // configs declare the same value (IMP_ID_VALUE / platform.impid) and must move with it.
 // mimpid[7:0] is reserved.
-localparam         [23:0] RTL_VERSION              = 24'h010000;
+localparam         [23:0] RTL_VERSION              = 24'h010001;
 
 
 
@@ -641,6 +641,7 @@ arv_decode #(.ARST_EN(ASYNC_RST_EN_PROC),
              .MUL_EN      (MUL_EN           ),
              .DIV_EN      (DIV_EN           ),
              .PMP_NR      (PMP_NR_PROC      ),
+             .TRIGGER_EN  (DM_TRIGGER_EN    ),
              .SU_MODE_EN  (SU_MODE_EN_PROC  ),
              .ZIHPM_NR    (ZIHPM_NR_PROC    )) arv_decode_inst (
 
@@ -1048,6 +1049,7 @@ arv_csr_top #(.ARST_EN(ASYNC_RST_EN_PROC       ),
     .ex_uop_ready_i                     ( ex_uop_ready                     ),
     .ex_uop_take_branch_i               ( ex_uop_take_branch               ),
     .id_instruction_valid_i             ( id_instruction_valid             ),
+    .wb_dph_ongoing_i                   ( wb_dph_ongoing                   ),
     .wb_ldst_ready_i                    ( wb_ldst_ready                    ),
 
 // PIPELINE MONITORING & CONTROL IN CASE OF TRAP

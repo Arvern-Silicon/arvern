@@ -73,6 +73,7 @@ module  arv_csr_debug (
 // Debug-mode status / control to the rest of the core
     output wire           debug_mode_o,                // 1 = hart is in Debug Mode (halted)
     output wire           debug_halt_active_o,         // issue-stall + IRQ-mask + clock-alive
+    output wire           debug_halt_preempt_o,        // Debug Mode entered this cycle on haltreq / step / resethaltreq (outranks a trigger)
     output wire           debug_issue_hold_o,          // EARLY flop-sourced superset of the entry/halt issue-stall, minus the ebreak leg (decode's debug gating term)
     output wire           debug_ebreak_cfg_o,          // dcsr.ebreak* enable for the CURRENT privilege; decode ANDs it with its local ebreak decode
     output wire           debug_resume_redirect_o,     // 1-cycle: redirect fetch to dpc (trap mux)
@@ -172,6 +173,9 @@ wire debug_resume_redirect = debug_mode_q & resume_req_i & dpc_captured_q & ~tra
 // Issue stall: from the entry cycle (combinational, holds the ebreak) through the
 // whole halt. Exit redirect is covered by the trap-stall path, so no extension here.
 wire debug_halt_active = debug_mode_q | debug_entry;
+
+assign debug_halt_preempt_o = ~debug_mode_q & ~trap_pending_i & ~entry_defer_i &
+                              (debug_req_i | step_pending_q | reset_halt_entry);
 
 // EARLY issue hold for decode's issue/branch gating: a flop-sourced SUPERSET of
 // debug_halt_active minus the ebreak leg (decode rebuilds that one locally from
