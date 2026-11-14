@@ -114,11 +114,18 @@ non-load/store rows and load/store rows.
 
 **Load/store rows** carry only `# mepc=… mcause=…` then `# kill:…`; their
 operands are visible in `mem_addr` / `tgt_reg`, so they never carry rs
-annotations.
+annotations. A load or store that made no bus access (a PMP or alignment
+fault, or squashed by an older one) has `-` in `mem`, `mem_addr`, `mem_data`
+and `tgt_reg`, and the annotation `# no bus access`.
 
-**Whole-line annotation.** `# wfi-end: <N> cycles (resume at cycle <M>)` is
-written on its own line after every WFI row — the only direct measure of a WFI
-sleep's length. Consumers skip it under contract rule 1.
+**Whole-line annotations**, each on its own line; consumers skip them under
+contract rule 1:
+
+| Annotation | When written |
+|---|---|
+| `# wfi-end: <N> cycles (resume at cycle <M>)` | After every WFI row — the only direct measure of a WFI sleep's length. |
+| `# mark <n>` | After a store of `<n>` to the firmware's trace marker word (`+trace_mark`, section 5). |
+| `# repeat: <N> lines left out (loop of <P> lines at 0x<pc>), cycles <A>..<B>` | With `+trace_collapse`: a loop of `<P>` lines starting at `<pc>` was logged twice, then its `<N>` next identical lines (cycles `<A>` to `<B>`) were left out. |
 
 Multiple annotations on the same row are separated by two spaces.
 
@@ -166,6 +173,20 @@ Production conditions:
 | `SIMULATION_NOTRACE=1` set by hand | no | An explicit `SIMULATION_NOTRACE=0` re-enables the trace even under `-j N`. |
 
 `SIMULATION_TRACE_DEST=<path>` relocates the trace at the end of the run.
+
+**Trace controls.** Plusargs of the simulation narrow what is written; without
+them every dispatched instruction is logged:
+
+| Plusarg | Effect |
+|---|---|
+| `+trace_from=<cycle>` `+trace_to=<cycle>` | Only rows whose dispatch cycle is in `[from, to)`. |
+| `+trace_mark=<hex address>` | A store to this word is a firmware marker: a `# mark <value>` line follows its row. |
+| `+trace_start=<n>` `+trace_stop=<n>` | Rows from the marker store of value `n` (start) up to and including the one of value `n` (stop). |
+| `+trace_collapse` | A short loop (up to 16 lines) whose lines repeat identically — same instructions, addresses, data and register values, no store, jump, trap or CSR access, typically a status poll — is logged twice; the identical lines after that are replaced by one `# repeat:` line. |
+
+A windowed trace starts with the shadow state of the moment (call stack,
+pending GPU commands) unknown to its consumers; a collapsed loop's cycles are
+still the gaps between the surrounding rows.
 
 The trace is written incrementally during simulation and flushed at
 `$finish` — partial traces from `Ctrl+C` runs are valid prefix views. The

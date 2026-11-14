@@ -653,6 +653,17 @@ module probes_instructions #(
   //   Zcmp multi-memory instructions (CM.PUSH/POP/POPRET/POPRETZ, CM.JT/JALT)
   //   append a trailing comment: # <N> mem ops
   //
+  // Optional controls (plusargs; without them every instruction is logged):
+  //   +trace_from=<cycle> +trace_to=<cycle>  log only dispatch cycles in [from, to)
+  //   +trace_mark=<hex address>              a store to this word is a firmware
+  //                                          marker: "# mark <value>" follows it
+  //   +trace_start=<n> +trace_stop=<n>       log from the marker store of value n
+  //                                          up to and including the one of value n
+  //   +trace_collapse                        a short loop repeating identical lines
+  //                                          (no store, jump, trap or CSR access) is
+  //                                          logged twice, then "# repeat: ..." gives
+  //                                          the lines left out and their cycles
+  //
   // Post-processing tips:
   //   - CPI per instruction: gap in cycle between consecutive lines
   //   - Instruction mix:     histogram on mnemonic field (awk/python)
@@ -719,9 +730,30 @@ module probes_instructions #(
   wire [31:0] trace_wr_data = `ARV_CPU_INST.ex_csr_reg_dest_wr ? `ARV_CPU_INST.ex_csr_reg_dest_wdata
                                                       : `ARV_CPU_INST.ex_alu_reg_dest_wdata;
 
-  // Pending LS instruction buffer: dispatch info is saved here and the log
-  // line is only emitted once the AHB data phase completes (dph_last), at
-  // which point both address and data are known.
+  // LS instructions: the dispatch info is saved in trace_lq_* and moves to
+  // trace_ls_* when the instruction's AHB address phase is accepted (it is
+  // still in EX, so no younger instruction has dispatched); the log line is
+  // emitted once that data phase completes (dph_last), when both address and
+  // data are known. A dispatched LS that never reaches the bus (it faulted) is
+  // logged without memory columns when the next instruction dispatches.
+  reg          trace_lq_pending;
+  reg   [63:0] trace_lq_cycle;
+  reg   [31:0] trace_lq_pc;
+  reg   [31:0] trace_lq_bin;
+  reg    [1:0] trace_lq_priv;
+  reg          trace_lq_trap_valid;
+  reg          trace_lq_trap_is_irq;
+  reg          trace_lq_trap_is_nmi;
+  reg          trace_lq_trap_had_kill;
+  reg    [4:0] trace_lq_trap_cause;
+  reg    [4:0] trace_lq_store_src;
+  reg    [1:0] trace_lq_store_width;
+  reg   [31:0] trace_lq_mepc;
+  reg   [31:0] trace_lq_mcause;
+  // The data phase of an LS instruction (not of a Zcmp/Zcmt micro-op)
+  wire         trace_aph_cap = `ARV_CPU_INST.arv_load_store_inst.aph_valid & trace_lq_pending &
+                               ~`ARV_CPU_INST.arv_load_store_inst.ex_uop_enable_i &
+                               ~`ARV_CPU_INST.arv_load_store_inst.ex_uop_jt_active_i;
   reg          trace_ls_pending;
   reg   [63:0] trace_ls_cycle;
   reg   [31:0] trace_ls_pc;
@@ -886,8 +918,125 @@ module probes_instructions #(
     end
   endfunction
 
+  // Output control: lines go to trace_wfd, the file or 0 (left out)
+  integer      trace_wfd;
+  reg   [63:0] trace_from_c;
+  reg   [63:0] trace_to_c;
+  reg          trace_mark_en;
+  reg   [31:0] trace_mark_addr;
+  reg          trace_start_en;
+  reg   [31:0] trace_start_id;
+  reg          trace_stop_en;
+  reg   [31:0] trace_stop_id;
+  reg          trace_started;
+  reg          trace_stopped;
+  reg          trace_collapse_en;
+  // Loop collapsing: the keys of the last 32 lines (bit 255: not collapsible)
+  reg  [255:0] tc_hist [0:31];
+  integer      tc_ptr;
+  integer      tc_cnt;
+  reg          tc_on;
+  integer      tc_p;
+  integer      tc_lines;
+  reg   [63:0] tc_c0;
+  reg   [63:0] tc_c1;
+  reg   [31:0] tc_pc;
+
+  // The lines left out by a loop being collapsed
+  task trace_collapse_note;
+    begin
+      if (tc_on && (tc_lines > 0))
+        $fwrite(trace_fd, "# repeat: %0d lines left out (loop of %0d lines at 0x%08h), cycles %0d..%0d\n",
+                tc_lines, tc_p, tc_pc, tc_c0, tc_c1);
+      tc_on = 1'b0;
+    end
+  endtask
+
+  // Called before a line is written: sets trace_wfd. key: the line's content
+  // without its cycle; start: the line is the start marker
+  task trace_line_begin;
+    input [255:0] key;
+    input  [63:0] cyc;
+    input         start;
+    integer       p, i;
+    reg           same;
+    begin
+      if (start)
+        trace_started = 1'b1;
+      if (!trace_started || trace_stopped || (cyc < trace_from_c) || (cyc >= trace_to_c)) begin
+        trace_collapse_note;
+        tc_cnt    = 0;
+        trace_wfd = 0;
+      end else if (!trace_collapse_en)
+        trace_wfd = trace_fd;
+      else begin
+        trace_wfd = trace_fd;
+        if (tc_on) begin
+          if (key == tc_hist[(tc_ptr - tc_p + 1) & 31]) begin
+            if (tc_lines == 0)
+              tc_c0 = cyc;
+            tc_lines  = tc_lines + 1;
+            tc_c1     = cyc;
+            trace_wfd = 0;
+          end else
+            trace_collapse_note;
+        end
+        tc_ptr = (tc_ptr + 1) & 31;
+        tc_hist[tc_ptr] = key;
+        if (tc_cnt < 32)
+          tc_cnt = tc_cnt + 1;
+        // Two identical iterations of a loop of p lines just ended: collapse
+        if (!tc_on && !key[255])
+          for (p = 1; (p <= 16) && !tc_on; p = p + 1)
+            if ((tc_cnt >= 2 * p) && (tc_hist[(tc_ptr - p) & 31][223:192] == key[223:192])) begin
+              same = 1'b1;
+              for (i = 0; i < p; i = i + 1)
+                if ((tc_hist[(tc_ptr - i) & 31] != tc_hist[(tc_ptr - i - p) & 31]) || tc_hist[(tc_ptr - i) & 31][255])
+                  same = 1'b0;
+              if (same) begin
+                tc_on    = 1'b1;
+                tc_p     = p;
+                tc_lines = 0;
+                tc_pc    = tc_hist[(tc_ptr - p + 1) & 31][223:192];
+              end
+            end
+      end
+    end
+  endtask
+
+  // Jumps (JAL, JALR, C.J, C.JAL, C.JR, C.JALR): never collapsed
+  function trace_is_jump;
+    input [31:0] bin;
+    begin
+      trace_is_jump = (bin[1:0] == 2'b11) ? ((bin[6:0] == 7'b1101111) || (bin[6:0] == 7'b1100111)) :
+                      (bin[1:0] == 2'b01) ? ((bin[15:13] == 3'b001) || (bin[15:13] == 3'b101)) :
+                      (bin[1:0] == 2'b10) ? ((bin[15:13] == 3'b100) && (bin[6:2] == 5'd0) && (bin[11:7] != 5'd0)) :
+                      1'b0;
+    end
+  endfunction
+
+  reg  [255:0] trace_key;
+  reg          trace_is_mark;
+  reg   [31:0] trace_mark_val;
+
   initial begin
     trace_fd          = $fopen("asphalt.log", "w");
+    trace_wfd         = trace_fd;
+    trace_from_c      = 64'd0;
+    trace_to_c        = {64{1'b1}};
+    trace_mark_en     = $value$plusargs("trace_mark=%h", trace_mark_addr);
+    trace_start_en    = $value$plusargs("trace_start=%d", trace_start_id);
+    trace_stop_en     = $value$plusargs("trace_stop=%d", trace_stop_id);
+    trace_collapse_en = $test$plusargs("trace_collapse");
+    if (!$value$plusargs("trace_from=%d", trace_from_c)) trace_from_c = 64'd0;
+    if (!$value$plusargs("trace_to=%d", trace_to_c))     trace_to_c   = {64{1'b1}};
+    trace_started     = !trace_start_en;
+    trace_stopped     = 1'b0;
+    tc_ptr            = 0;
+    tc_cnt            = 0;
+    tc_on             = 1'b0;
+    tc_p              = 1;
+    tc_lines          = 0;
     $timeformat(-9, 0, " ns", 10); // for $display/%t messages elsewhere in testbench
     trace_cycle       = 64'd0;
     trace_ls_pending  = 1'b0;
@@ -982,6 +1131,7 @@ module probes_instructions #(
   //   4. dispatch   : buffer new LS or non-LS instruction
   always @(posedge trace_clk or negedge trace_resetn) begin
     if (!trace_resetn) begin
+      trace_lq_pending  <= 1'b0;
       trace_ls_pending  <= 1'b0;
       trace_ls_cycle    <= 64'd0;
       trace_ls_pc       <= 32'd0;
@@ -1039,17 +1189,19 @@ module probes_instructions #(
         trace_nls_csr_data_valid <= 1'b1;
       end
 
-      // 1. AHB address phase: capture address and direction before they change
-      if (`ARV_CPU_INST.arv_load_store_inst.aph_valid) begin
-        trace_ls_addr <= `ARV_CPU_INST.arv_load_store_inst.data_haddr_o;
-        trace_ls_rw   <= `ARV_CPU_INST.arv_load_store_inst.data_hwrite_o;
-      end
-
       // 2. AHB data phase: emit the buffered LS instruction line
       if (`ARV_CPU_INST.arv_load_store_inst.dph_last && trace_ls_pending) begin
-        $fwrite(trace_fd, "%-12d  %-12d  0x%08h  0x%08h  ",
+        trace_mark_val = `ARV_CPU_INST.arv_load_store_inst.data_hwdata_o;
+        trace_is_mark  = trace_mark_en && trace_ls_rw && (trace_ls_addr == trace_mark_addr);
+        trace_key      = {trace_ls_rw | trace_ls_trap_valid, 31'd1, trace_ls_pc, trace_ls_bin, trace_ls_addr,
+                          `ARV_CPU_INST.arv_load_store_inst.data_hrdata_i,
+                          `ARV_CPU_INST.arv_load_store_inst.wb_load_reg_dest_wdata_o,
+                          27'd0, `ARV_CPU_INST.arv_load_store_inst.wb_reg_dest_sel_o, 32'd0};
+        trace_line_begin(trace_key, trace_ls_cycle,
+                         trace_is_mark && trace_start_en && (trace_mark_val == trace_start_id));
+        $fwrite(trace_wfd, "%-12d  %-12d  0x%08h  0x%08h  ",
                 trace_ls_cycle, trace_ls_cycle * CLK_PERIOD_NS, trace_ls_pc, trace_ls_bin);
-        fwrite_str_lj(trace_fd, instruction_str(trace_ls_bin, trace_ls_pc), 32);
+        fwrite_str_lj(trace_wfd, instruction_str(trace_ls_bin, trace_ls_pc), 32);
         if (trace_ls_rw) begin
           case (trace_ls_store_width)
             2'd0: $sformat(trace_tgt_buf, "[x%0d]=0x%02h",  trace_ls_store_src,
@@ -1059,30 +1211,59 @@ module probes_instructions #(
             default: $sformat(trace_tgt_buf, "[x%0d]=0x%08h", trace_ls_store_src,
                               `ARV_CPU_INST.arv_load_store_inst.data_hwdata_o);
           endcase
-          $fwrite(trace_fd, "  %-4s  0x%08h  0x%08h  ",
+          $fwrite(trace_wfd, "  %-4s  0x%08h  0x%08h  ",
                   "W", trace_ls_addr, `ARV_CPU_INST.arv_load_store_inst.data_hwdata_o);
         end else begin
           $sformat(trace_tgt_buf, "x%0d=0x%08h",
                   `ARV_CPU_INST.arv_load_store_inst.wb_reg_dest_sel_o,
                   `ARV_CPU_INST.arv_load_store_inst.wb_load_reg_dest_wdata_o);
-          $fwrite(trace_fd, "  %-4s  0x%08h  0x%08h  ",
+          $fwrite(trace_wfd, "  %-4s  0x%08h  0x%08h  ",
                   "R", trace_ls_addr, `ARV_CPU_INST.arv_load_store_inst.data_hrdata_i);
         end
-        fwrite_str_lj(trace_fd, {{(64-20){8'h00}}, trace_tgt_buf}, 20);
-        $fwrite(trace_fd, "  %-2d  %-2s  ",
+        fwrite_str_lj(trace_wfd, {{(64-20){8'h00}}, trace_tgt_buf}, 20);
+        $fwrite(trace_wfd, "  %-2d  %-2s  ",
                 (trace_ls_bin[1:0] != 2'b11) ? 32'd2 : 32'd4,
                 "-");
         if (trace_ls_trap_valid)
-          fwrite_str_lj(trace_fd, {{(64-16){8'h00}}, trap_cause_str(trace_ls_trap_is_nmi, trace_ls_trap_is_irq, trace_ls_trap_cause)}, 9);
+          fwrite_str_lj(trace_wfd, {{(64-16){8'h00}}, trap_cause_str(trace_ls_trap_is_nmi, trace_ls_trap_is_irq, trace_ls_trap_cause)}, 9);
         else
-          $fwrite(trace_fd, "%-9s", "-");
-        $fwrite(trace_fd, "  %-4s", priv_char(trace_ls_priv));
+          $fwrite(trace_wfd, "%-9s", "-");
+        $fwrite(trace_wfd, "  %-4s", priv_char(trace_ls_priv));
         if (trace_ls_trap_valid && !trace_ls_trap_is_nmi)
-          $fwrite(trace_fd, "  # mepc=0x%08h mcause=0x%08h", trace_ls_mepc, trace_ls_mcause);
+          $fwrite(trace_wfd, "  # mepc=0x%08h mcause=0x%08h", trace_ls_mepc, trace_ls_mcause);
         if (trace_ls_trap_valid && trace_ls_trap_had_kill)
-          $fwrite(trace_fd, "  # kill:%s", trace_ls_trap_is_nmi ? "NMI" : "IRQ");
-        $fwrite(trace_fd, "\n");
+          $fwrite(trace_wfd, "  # kill:%s", trace_ls_trap_is_nmi ? "NMI" : "IRQ");
+        $fwrite(trace_wfd, "\n");
+        if (trace_is_mark) begin
+          $fwrite(trace_wfd, "# mark %0d\n", trace_mark_val);
+          if (trace_stop_en && trace_started && (trace_mark_val == trace_stop_id)) begin
+            trace_collapse_note;
+            trace_stopped = 1'b1;
+          end
+        end
         trace_ls_pending <= 1'b0;
+      end
+
+      // 2a. AHB address phase of the dispatched LS: its line now waits for
+      //     this data phase (after the emit above: both can share an edge)
+      if (trace_aph_cap) begin
+        trace_ls_pending       <= 1'b1;
+        trace_lq_pending       <= 1'b0;
+        trace_ls_addr          <= `ARV_CPU_INST.arv_load_store_inst.data_haddr_o;
+        trace_ls_rw            <= `ARV_CPU_INST.arv_load_store_inst.data_hwrite_o;
+        trace_ls_cycle         <= trace_lq_cycle;
+        trace_ls_pc            <= trace_lq_pc;
+        trace_ls_bin           <= trace_lq_bin;
+        trace_ls_priv          <= trace_lq_priv;
+        trace_ls_trap_valid    <= trace_lq_trap_valid;
+        trace_ls_trap_is_irq   <= trace_lq_trap_is_irq;
+        trace_ls_trap_is_nmi   <= trace_lq_trap_is_nmi;
+        trace_ls_trap_had_kill <= trace_lq_trap_had_kill;
+        trace_ls_trap_cause    <= trace_lq_trap_cause;
+        trace_ls_store_src     <= trace_lq_store_src;
+        trace_ls_store_width   <= trace_lq_store_width;
+        trace_ls_mepc          <= trace_lq_mepc;
+        trace_ls_mcause        <= trace_lq_mcause;
       end
 
       // 2b. Branch cancel correction: id_branch_detect_o is speculative
@@ -1096,60 +1277,68 @@ module probes_instructions #(
       //    If trace_wr_en is 0 (branch, CSR-no-rd, etc.) but a new dispatch
       //    arrives, emit with "-" so the log stays in program order.
       if (trace_nls_pending && (trace_wr_en || trace_valid)) begin
-        $fwrite(trace_fd, "%-12d  %-12d  0x%08h  0x%08h  ",
+        trace_key = {trace_nls_trap_valid | (trace_nls_xret != 2'd0) | trace_nls_is_csr | (trace_nls_memops != 5'd0) |
+                     trace_nls_is_wfi | trace_is_jump(trace_nls_bin),
+                     29'd0, trace_nls_is_branch & trace_nls_branch_taken & ~`ARV_CPU_INST.arv_decode_inst.id_branch_cancel_o,
+                     trace_wr_en, trace_nls_pc, trace_nls_bin, 27'd0, trace_wr_addr & {5{trace_wr_en}},
+                     trace_wr_data & {32{trace_wr_en}},
+                     trace_nls_rs1_val & {32{trace_nls_has_rs1}}, trace_nls_rs2_val & {32{trace_nls_has_rs2}},
+                     32'd0};
+        trace_line_begin(trace_key, trace_nls_cycle, 1'b0);
+        $fwrite(trace_wfd, "%-12d  %-12d  0x%08h  0x%08h  ",
                 trace_nls_cycle, trace_nls_cycle * CLK_PERIOD_NS, trace_nls_pc, trace_nls_bin);
-        fwrite_str_lj(trace_fd, instruction_str(trace_nls_bin, trace_nls_pc), 32);
+        fwrite_str_lj(trace_wfd, instruction_str(trace_nls_bin, trace_nls_pc), 32);
         if (trace_wr_en) begin
           $sformat(trace_tgt_buf, "x%0d=0x%08h", trace_wr_addr, trace_wr_data);
-          $fwrite(trace_fd, "  %-4s  %-10s  %-10s  ", "-", "-", "-");
-          fwrite_str_lj(trace_fd, {{(64-20){8'h00}}, trace_tgt_buf}, 20);
+          $fwrite(trace_wfd, "  %-4s  %-10s  %-10s  ", "-", "-", "-");
+          fwrite_str_lj(trace_wfd, {{(64-20){8'h00}}, trace_tgt_buf}, 20);
         end else
-          $fwrite(trace_fd, "  %-4s  %-10s  %-10s  %-20s",
+          $fwrite(trace_wfd, "  %-4s  %-10s  %-10s  %-20s",
                   "-", "-", "-", "-");
         // sz, br, and priv columns
         // Guard against same-cycle cancel: check both the latched flag
         // AND the live cancel wire for robustness.
-        $fwrite(trace_fd, "  %-2d  %-2s  ",
+        $fwrite(trace_wfd, "  %-2d  %-2s  ",
                 (trace_nls_bin[1:0] != 2'b11) ? 32'd2 : 32'd4,
                 trace_nls_is_branch ?
                   ((trace_nls_branch_taken && !`ARV_CPU_INST.arv_decode_inst.id_branch_cancel_o) ? "T" : "N")
                   : "-");
         if (trace_nls_trap_valid)
-          fwrite_str_lj(trace_fd, {{(64-16){8'h00}}, trap_cause_str(trace_nls_trap_is_nmi, trace_nls_trap_is_irq, trace_nls_trap_cause)}, 9);
+          fwrite_str_lj(trace_wfd, {{(64-16){8'h00}}, trap_cause_str(trace_nls_trap_is_nmi, trace_nls_trap_is_irq, trace_nls_trap_cause)}, 9);
         else if (trace_nls_xret == 2'd1)
-          $fwrite(trace_fd, "%-9s", "MRET");
+          $fwrite(trace_wfd, "%-9s", "MRET");
         else if (trace_nls_xret == 2'd2)
-          $fwrite(trace_fd, "%-9s", "SRET");
+          $fwrite(trace_wfd, "%-9s", "SRET");
         else if (trace_nls_xret == 2'd3)
-          $fwrite(trace_fd, "%-9s", "MNRET");
+          $fwrite(trace_wfd, "%-9s", "MNRET");
         else
-          $fwrite(trace_fd, "%-9s", "-");
-        $fwrite(trace_fd, "  %-4s", priv_char(trace_nls_priv));
+          $fwrite(trace_wfd, "%-9s", "-");
+        $fwrite(trace_wfd, "  %-4s", priv_char(trace_nls_priv));
         // Zcmp/Zcmt: annotate hidden memory operations
         if (trace_nls_memops > 0)
-          $fwrite(trace_fd, "  # %0d mem ops", trace_nls_memops);
+          $fwrite(trace_wfd, "  # %0d mem ops", trace_nls_memops);
         // Kill annotation: a muldiv/uop was aborted before this trap entry
         if (trace_nls_trap_valid && trace_nls_trap_had_kill)
-          $fwrite(trace_fd, "  # kill:%s", trace_nls_trap_is_nmi ? "NMI" : "IRQ");
+          $fwrite(trace_wfd, "  # kill:%s", trace_nls_trap_is_nmi ? "NMI" : "IRQ");
         // CSR write value annotation
         if (trace_nls_is_csr) begin
           if (trace_wr_en)
-            $fwrite(trace_fd, "  # csr:0x%03h:=0x%08h", trace_nls_csr_addr, trace_csr_wr_data);
+            $fwrite(trace_wfd, "  # csr:0x%03h:=0x%08h", trace_nls_csr_addr, trace_csr_wr_data);
           else if (trace_nls_csr_data_valid)
-            $fwrite(trace_fd, "  # csr:0x%03h:=0x%08h", trace_nls_csr_addr, trace_nls_csr_wdata);
+            $fwrite(trace_wfd, "  # csr:0x%03h:=0x%08h", trace_nls_csr_addr, trace_nls_csr_wdata);
         end
         // Source register annotation
         if (trace_nls_has_rs1 && trace_nls_rs1_sel != 5'd0)
-          $fwrite(trace_fd, "  # rs1:x%0d=0x%08h", trace_nls_rs1_sel, trace_nls_rs1_val);
+          $fwrite(trace_wfd, "  # rs1:x%0d=0x%08h", trace_nls_rs1_sel, trace_nls_rs1_val);
         if (trace_nls_has_rs2 && trace_nls_rs2_sel != 5'd0)
-          $fwrite(trace_fd, "  rs2:x%0d=0x%08h", trace_nls_rs2_sel, trace_nls_rs2_val);
+          $fwrite(trace_wfd, "  rs2:x%0d=0x%08h", trace_nls_rs2_sel, trace_nls_rs2_val);
         // Trap save state on first instruction of handler
         if (trace_nls_trap_valid && !trace_nls_trap_is_nmi)
-          $fwrite(trace_fd, "  # mepc=0x%08h mcause=0x%08h", trace_nls_mepc, trace_nls_mcause);
-        $fwrite(trace_fd, "\n");
+          $fwrite(trace_wfd, "  # mepc=0x%08h mcause=0x%08h", trace_nls_mepc, trace_nls_mcause);
+        $fwrite(trace_wfd, "\n");
         // WFI end annotation: immediately after WFI line, before next instruction
         if (trace_nls_is_wfi)
-          $fwrite(trace_fd, "# wfi-end: %0d cycles (resume at cycle %0d)\n",
+          $fwrite(trace_wfd, "# wfi-end: %0d cycles (resume at cycle %0d)\n",
                   trace_cycle - trace_nls_cycle, trace_cycle);
         trace_nls_pending        <= 1'b0;
         trace_nls_csr_data_valid <= 1'b0;
@@ -1157,6 +1346,8 @@ module probes_instructions #(
 
       // 4. Instruction dispatch: buffer for deferred emit
       if (trace_valid) begin
+        if (trace_lq_pending && !trace_aph_cap)
+          trace_lq_no_access;
         if (!trace_is_ls) begin
           trace_nls_cycle        <= trace_cycle;
           trace_nls_pc           <= pc_id;
@@ -1215,71 +1406,93 @@ module probes_instructions #(
           trace_nls_mepc   <= trace_trap_mepc_buf;
           trace_nls_mcause <= trace_trap_mcause_buf;
         end else begin
-          trace_ls_cycle   <= trace_cycle;
-          trace_ls_pc      <= pc_id;
-          trace_ls_bin     <= bin_id;
-          trace_ls_pending <= 1'b1;
-          trace_ls_priv    <= trace_priv;
+          trace_lq_cycle   <= trace_cycle;
+          trace_lq_pc      <= pc_id;
+          trace_lq_bin     <= bin_id;
+          trace_lq_pending <= 1'b1;
+          trace_lq_priv    <= trace_priv;
           // Transfer trap annotation to this instruction if pending
-          trace_ls_trap_valid    <= trace_trap_pending;
-          trace_ls_trap_is_irq   <= trace_trap_was_irq;
-          trace_ls_trap_is_nmi   <= trace_trap_was_nmi;
-          trace_ls_trap_had_kill <= trace_trap_had_kill;
-          trace_ls_trap_cause    <= trace_trap_cause_buf;
+          trace_lq_trap_valid    <= trace_trap_pending;
+          trace_lq_trap_is_irq   <= trace_trap_was_irq;
+          trace_lq_trap_is_nmi   <= trace_trap_was_nmi;
+          trace_lq_trap_had_kill <= trace_trap_had_kill;
+          trace_lq_trap_cause    <= trace_trap_cause_buf;
           if (trace_trap_pending)
             trace_trap_pending  <= 1'b0;
           // Save store source register for later emit
-          if (bin_id[1:0] == 2'b11)       trace_ls_store_src <= bin_id[24:20];
-          else if (bin_id[1:0] == 2'b10)  trace_ls_store_src <= bin_id[6:2];   // C.SWSP
-          else                            trace_ls_store_src <= {2'b01, bin_id[4:2]}; // C.SW/SB/SH
+          if (bin_id[1:0] == 2'b11)       trace_lq_store_src <= bin_id[24:20];
+          else if (bin_id[1:0] == 2'b10)  trace_lq_store_src <= bin_id[6:2];   // C.SWSP
+          else                            trace_lq_store_src <= {2'b01, bin_id[4:2]}; // C.SW/SB/SH
           // Store width (for tgt_reg value annotation)
           if (bin_id[1:0] == 2'b11) begin               // Standard store
             case (bin_id[13:12])                         // funct3[1:0]
-              2'b00:   trace_ls_store_width <= 2'd0;     // SB
-              2'b01:   trace_ls_store_width <= 2'd1;     // SH
-              default: trace_ls_store_width <= 2'd2;     // SW
+              2'b00:   trace_lq_store_width <= 2'd0;     // SB
+              2'b01:   trace_lq_store_width <= 2'd1;     // SH
+              default: trace_lq_store_width <= 2'd2;     // SW
             endcase
           end else if (bin_id[1:0]==2'b00 && bin_id[15:13]==3'b100) begin  // Zcb Q0
-            if      (bin_id[12:10] == 3'b010) trace_ls_store_width <= 2'd0;  // C.SB
-            else if (bin_id[12:10] == 3'b011) trace_ls_store_width <= 2'd1;  // C.SH
-            else                              trace_ls_store_width <= 2'd2;  // Zcb loads (unused)
-          end else                            trace_ls_store_width <= 2'd2;  // C.SW / C.SWSP
+            if      (bin_id[12:10] == 3'b010) trace_lq_store_width <= 2'd0;  // C.SB
+            else if (bin_id[12:10] == 3'b011) trace_lq_store_width <= 2'd1;  // C.SH
+            else                              trace_lq_store_width <= 2'd2;  // Zcb loads (unused)
+          end else                            trace_lq_store_width <= 2'd2;  // C.SW / C.SWSP
           // Trap save state for annotation
-          trace_ls_mepc   <= trace_trap_mepc_buf;
-          trace_ls_mcause <= trace_trap_mcause_buf;
+          trace_lq_mepc   <= trace_trap_mepc_buf;
+          trace_lq_mcause <= trace_trap_mcause_buf;
         end
       end
 
     end
   end
 
+  // A dispatched LS instruction that made no bus access (it faulted)
+  task trace_lq_no_access;
+    begin
+      trace_line_begin({1'b1, 255'd0}, trace_lq_cycle, 1'b0);
+      $fwrite(trace_wfd, "%-12d  %-12d  0x%08h  0x%08h  ",
+              trace_lq_cycle, trace_lq_cycle * CLK_PERIOD_NS, trace_lq_pc, trace_lq_bin);
+      fwrite_str_lj(trace_wfd, instruction_str(trace_lq_bin, trace_lq_pc), 32);
+      $fwrite(trace_wfd, "  %-4s  %-10s  %-10s  %-20s  %-2d  %-2s  ", "-", "-", "-", "-",
+              (trace_lq_bin[1:0] != 2'b11) ? 32'd2 : 32'd4, "-");
+      if (trace_lq_trap_valid)
+        fwrite_str_lj(trace_wfd, {{(64-16){8'h00}}, trap_cause_str(trace_lq_trap_is_nmi, trace_lq_trap_is_irq, trace_lq_trap_cause)}, 9);
+      else
+        $fwrite(trace_wfd, "%-9s", "-");
+      $fwrite(trace_wfd, "  %-4s  # no bus access\n", priv_char(trace_lq_priv));
+    end
+  endtask
+
   // Flush any pending instruction at end of simulation and close the trace file.
   task trace_flush_and_close;
     begin
+      trace_collapse_note;
       if (trace_nls_pending) begin
-        $fwrite(trace_fd, "%-12d  %-12d  0x%08h  0x%08h  ",
+        trace_line_begin({1'b1, 255'd0}, trace_nls_cycle, 1'b0);
+        $fwrite(trace_wfd, "%-12d  %-12d  0x%08h  0x%08h  ",
                 trace_nls_cycle, trace_nls_cycle * CLK_PERIOD_NS, trace_nls_pc, trace_nls_bin);
-        fwrite_str_lj(trace_fd, instruction_str(trace_nls_bin, trace_nls_pc), 32);
-        $fwrite(trace_fd, "  %-4s  %-10s  %-10s  %-15s  %-2d  %-2s  %-9s  %-4s",
+        fwrite_str_lj(trace_wfd, instruction_str(trace_nls_bin, trace_nls_pc), 32);
+        $fwrite(trace_wfd, "  %-4s  %-10s  %-10s  %-15s  %-2d  %-2s  %-9s  %-4s",
                 "-", "-", "-", "-",
                 (trace_nls_bin[1:0] != 2'b11) ? 32'd2 : 32'd4,
                 trace_nls_is_branch ? (trace_nls_branch_taken ? "T" : "N") : "-",
                 "-",
                 priv_char(trace_nls_priv));
         if (trace_nls_memops > 0)
-          $fwrite(trace_fd, "  # %0d mem ops", trace_nls_memops);
-        $fwrite(trace_fd, "\n");
+          $fwrite(trace_wfd, "  # %0d mem ops", trace_nls_memops);
+        $fwrite(trace_wfd, "\n");
       end
       if (trace_ls_pending) begin
-        $fwrite(trace_fd, "%-12d  %-12d  0x%08h  0x%08h  ",
+        trace_line_begin({1'b1, 255'd0}, trace_ls_cycle, 1'b0);
+        $fwrite(trace_wfd, "%-12d  %-12d  0x%08h  0x%08h  ",
                 trace_ls_cycle, trace_ls_cycle * CLK_PERIOD_NS, trace_ls_pc, trace_ls_bin);
-        fwrite_str_lj(trace_fd, instruction_str(trace_ls_bin, trace_ls_pc), 32);
-        $fwrite(trace_fd, "  %-4s  0x%08h  %-10s  %-20s  %-2d  %-2s  %-9s  %-4s\n",
+        fwrite_str_lj(trace_wfd, instruction_str(trace_ls_bin, trace_ls_pc), 32);
+        $fwrite(trace_wfd, "  %-4s  0x%08h  %-10s  %-20s  %-2d  %-2s  %-9s  %-4s\n",
                 trace_ls_rw ? "W" : "R", trace_ls_addr, "-", "-",
                 (trace_ls_bin[1:0] != 2'b11) ? 32'd2 : 32'd4, "-",
                 "-",
                 priv_char(trace_ls_priv));
       end
+      if (trace_lq_pending)
+        trace_lq_no_access;
       $fclose(trace_fd);
     end
   endtask

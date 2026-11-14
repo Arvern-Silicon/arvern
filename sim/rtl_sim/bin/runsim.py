@@ -1482,6 +1482,9 @@ def run_test_variant(test_name: str, mode_arg: str, variant_args: list, log_dir:
             extra_parts.append('-D DTM_E2E -D DTM_I2C_E2E -D LONG_TIMEOUT')
         elif test_name and test_name.startswith('debug_dtm_jtag'):
             extra_parts.append('-D DTM_E2E -D DTM_JTAG_E2E -D LONG_TIMEOUT')
+        # Caller-supplied defines (e.g. -D ROM_WS_N=2 with -wsrom).
+        if os.environ.get('SIMULATION_USER_DEFINES'):
+            extra_parts.append(os.environ['SIMULATION_USER_DEFINES'])
         if extra_parts:
             sub_env['SIMULATION_EXTRA_DEFINES'] = ' '.join(extra_parts)
         else:

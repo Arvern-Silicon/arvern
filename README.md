@@ -46,7 +46,7 @@ Everything beyond the base pipeline is a parameter. Out of the box `arvern.v` is
 
 ## Release notes
 
-Latest release: **1.0.1**. 
+Latest release: **1.0.2**. 
 
 What changed in each release, and how to upgrade: [`CHANGELOG.md`](CHANGELOG.md).
 

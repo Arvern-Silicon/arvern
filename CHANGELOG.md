@@ -2,15 +2,48 @@
 
 All notable changes to the aRVern core are listed here. Versions follow
 [Semantic Versioning](https://semver.org/); `RTL_VERSION` in `rtl/verilog/arvern.v` (read back
-through `mimpid`) carries the same number.
+through `mimpid`) carries the number of the last release that changed the RTL.
 
 ## Versions
 
 | Version | Date |
 |---|---|
+| [1.0.2](#v1.0.2) | Nov 14, 2026 |
 | [1.0.1](#v1.0.1) | Oct 5, 2026 |
 | [1.0.0](#v1.0.0) | Oct 2, 2026 |
 | [0.1.0-preview](#v0.1.0-preview) | Jun 24, 2026 |
+
+<a id="v1.0.2"></a>
+
+## 1.0.2
+
+Verification and tooling release: no RTL change, so `mimpid` still reads 1.0.1. Drop-in
+for 1.0.1.
+
+### Added
+
+- **Instruction trace controls** (simulation plusargs): a cycle window (`+trace_from`,
+  `+trace_to`), firmware markers (`+trace_mark`, with `+trace_start` / `+trace_stop`
+  between two marker values) and `+trace_collapse`, which logs a short repeating loop
+  (a status poll) twice and summarises the rest in one `# repeat:` line. A load or store
+  that made no bus access is marked `# no bus access`
+  ([trace format](doc/asphalt_trace_format.md)).
+- **Fixed memory wait states in the testbench:** `ROM_WS_N` and `SRAM_WS_N` set a fixed
+  number of wait states instead of the random ones; `runsim.py` passes caller-supplied
+  defines from `SIMULATION_USER_DEFINES`.
+
+### Changed
+
+- Coverage tooling (`cov_const.py`, every repository's copy): the parameters of a
+  configuration are set with one `chparam`, so a design whose packed parameters depend on
+  another one elaborates without passing through an inconsistent intermediate set.
+
+### Fixed
+
+- Coverage tooling (`cov_html.py`, every repository's copy): the HTML report now matches
+  `cov_report.py`. It counted each toggle bit twice (Verilator records both directions)
+  and missed `label@column` branch names, so correct waivers showed as stale. The page
+  title names its own repository, so every copy is byte-identical again.
 
 <a id="v1.0.1"></a>
 

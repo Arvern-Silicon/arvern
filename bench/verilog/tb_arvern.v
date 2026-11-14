@@ -657,13 +657,23 @@ initial
 
     // Fixed wait-states
 `ifdef ROM_WS
+  `ifdef ROM_WS_N
+    s_rom_number_ws        =  `ROM_WS_N;
+  `else
     s_rom_number_ws        =  5;
+  `endif
     s_rom_random_ws_en     =  0;
 `endif
 `ifdef SRAM_WS
+  `ifdef SRAM_WS_N
+    s_sram_x_number_ws     =  `SRAM_WS_N;
+    s_sram_x_random_ws_en  =  0;
+    s_sram_nx_number_ws    =  `SRAM_WS_N;
+  `else
     s_sram_x_number_ws     =  5;
     s_sram_x_random_ws_en  =  0;
     s_sram_nx_number_ws    =  5;
+  `endif
     s_sram_nx_random_ws_en =  0;
 `endif
 `ifdef PERIPH_WS
